@@ -1,8 +1,12 @@
 import os
 from typing import Any, List, Optional
 
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models.llms import LLM
+
+try:
+    from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+except Exception:
+    CallbackManagerForLLMRun = Any
 
 try:
     from langchain_groq import ChatGroq
