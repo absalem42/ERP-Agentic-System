@@ -213,22 +213,30 @@ def test_direct_service_analytics_supports_worst_products_question(runtime_paths
     assert "Service A" in result["response"]
 
 
-def test_direct_service_prefers_hosted_analytics_agent_when_available(runtime_paths, monkeypatch):
+def test_direct_service_analytics_handles_total_analysis_prompt(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat("give me total analysis", "analytics")
+
+    assert result["agent_used"] == "analytics"
+    assert "Executive Summary" in result["response"]
+    assert "Total Revenue" in result["response"]
+
+
+def test_direct_service_routes_overall_performance_prompts_to_safe_summary(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
 
-    class FakeAnalyticsAgent:
-        def invoke(self, payload):
-            return {"output": f"AI analytics answer for: {payload['input']}"}
-
-    fake_module = types.SimpleNamespace(create_analytics_agent=lambda: FakeAnalyticsAgent())
-    monkeypatch.setitem(sys.modules, "backend.agents.AnalyticsAgent", fake_module)
-
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
     result = service.chat("give me a plain english executive analysis of overall performance", "analytics")
 
     assert result["agent_used"] == "analytics"
-    assert result["response"] == "AI analytics answer for: give me a plain english executive analysis of overall performance"
+    assert "Executive Summary" in result["response"]
+    assert "Total Revenue" in result["response"]

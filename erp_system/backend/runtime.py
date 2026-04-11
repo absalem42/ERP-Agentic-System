@@ -233,6 +233,10 @@ class DirectERPService:
             "average order value by month",
             "aov",
             "sales trend",
+            "total analysis",
+            "overall analysis",
+            "overall performance",
+            "executive summary",
         )
         return any(term in lower_message for term in deterministic_terms)
 
@@ -259,14 +263,8 @@ class DirectERPService:
         if not has_llm_credentials() or not _hosted_direct_ai_enabled():
             return None
 
-        try:
-            from .agents.AnalyticsAgent import create_analytics_agent
-
-            self._analytics_agent = create_analytics_agent()
-            return self._analytics_agent
-        except Exception:
-            self._analytics_agent = self._build_hosted_analytics_llm_agent()
-            return self._analytics_agent
+        self._analytics_agent = self._build_hosted_analytics_llm_agent()
+        return self._analytics_agent
 
     def _load_router_agent(self):
         if self._router_agent is not None:
@@ -366,6 +364,9 @@ class DirectERPService:
 
     def _analytics_fallback(self, message: str) -> str:
         lower_message = message.lower()
+        if any(term in lower_message for term in ["total analysis", "overall analysis", "overall performance", "executive summary"]):
+            return self._analytics_summary()
+
         if "revenue" in lower_message and "month" in lower_message:
             rows = self.sales_tools.sales_sql_read(
                 """
@@ -503,6 +504,40 @@ class DirectERPService:
             "Analytics fallback supports revenue by month, total revenue, top or worst products by revenue, "
             "top customers by revenue, average order value by month, and sales trends. "
             "Set GROQ_API_KEY to enable full analytics AI answers."
+        )
+
+    def _analytics_summary(self) -> str:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM customers")
+            customer_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM orders")
+            order_count = cursor.fetchone()[0]
+            cursor.execute("SELECT ROUND(COALESCE(SUM(total), 0), 2), ROUND(COALESCE(AVG(total), 0), 2) FROM orders")
+            total_revenue, average_order_value = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT c.name, ROUND(COALESCE(SUM(o.total), 0), 2) AS revenue
+                FROM customers c
+                LEFT JOIN orders o ON c.id = o.customer_id
+                GROUP BY c.id, c.name
+                ORDER BY revenue DESC
+                LIMIT 1
+                """
+            )
+            top_customer = cursor.fetchone()
+
+        top_customer_name = top_customer[0] if top_customer else "N/A"
+        top_customer_revenue = top_customer[1] if top_customer else 0
+
+        return (
+            "📊 **Executive Summary:**\n\n"
+            f"• Total Revenue: ${total_revenue:.2f}\n"
+            f"• Total Orders: {order_count}\n"
+            f"• Total Customers: {customer_count}\n"
+            f"• Average Order Value: ${average_order_value:.2f}\n"
+            f"• Top Customer by Revenue: {top_customer_name} (${top_customer_revenue:.2f})\n\n"
+            "This is the high-level business snapshot for the current demo dataset."
         )
 
 
