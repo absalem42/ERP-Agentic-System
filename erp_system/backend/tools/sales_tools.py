@@ -118,6 +118,16 @@ class SalesTools:
         })
         if len(self.conversation_buffer) > self.max_buffer_size:
             self.conversation_buffer.pop(0)
+
+    def _has_column(self, table_name: str, column_name: str) -> bool:
+        """Check whether a table includes a given column."""
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"PRAGMA table_info({table_name})")
+                return any(row[1] == column_name for row in cursor.fetchall())
+        except Exception:
+            return False
     
     def _handle_customer_query(self, text: str) -> str:
         """Handle customer-related queries"""
@@ -232,11 +242,12 @@ class SalesTools:
     def _list_customers(self) -> str:
         """List recent customers with basic info"""
         try:
+            phone_select = "c.phone AS phone," if self._has_column("customers", "phone") else "NULL AS phone,"
             with get_db() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT c.name, c.email, c.phone, c.created_at,
+                    SELECT c.name, c.email, """ + phone_select + """ c.created_at,
                            COUNT(o.id) as order_count,
                            COALESCE(SUM(o.total), 0) as total_spent
                     FROM customers c
@@ -275,20 +286,28 @@ class SalesTools:
             return "Please provide a search term of at least 2 characters"
             
         try:
+            has_phone = self._has_column("customers", "phone")
+            phone_select = "c.phone AS phone," if has_phone else "NULL AS phone,"
+            where_clause = "c.name LIKE ? OR c.email LIKE ?"
+            params = [f"%{search_term}%", f"%{search_term}%"]
+            if has_phone:
+                where_clause += " OR c.phone LIKE ?"
+                params.append(f"%{search_term}%")
+
             with get_db() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT c.name, c.email, c.phone, c.created_at,
+                    SELECT c.name, c.email, """ + phone_select + """ c.created_at,
                            COUNT(o.id) as order_count,
                            COALESCE(SUM(o.total), 0) as total_spent
                     FROM customers c
                     LEFT JOIN orders o ON c.id = o.customer_id
-                    WHERE c.name LIKE ? OR c.email LIKE ?
+                    WHERE """ + where_clause + """
                     GROUP BY c.id
                     ORDER BY c.name
                     LIMIT 5
-                """, (f"%{search_term}%", f"%{search_term}%"))
+                """, params)
                 customers = [dict(row) for row in cursor.fetchall()]
             
             if not customers:

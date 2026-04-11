@@ -1,6 +1,18 @@
 from typing import Dict, Any, Callable, List
 import json
+import sys
 from datetime import datetime
+
+
+def safe_print(message: str) -> None:
+    """Print safely even when stdout does not support Unicode."""
+    stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        sanitized = message.encode(encoding, errors="replace").decode(encoding)
+        print(sanitized)
 
 class MCPAdapter:
     """Basic in-process MCP adapter for tool registration and execution"""
@@ -17,7 +29,7 @@ class MCPAdapter:
             'parameters': parameters or {},
             'registered_at': datetime.now().isoformat()
         }
-        print(f"🔧 Registered tool: {name}")
+        safe_print(f"Registered tool: {name}")
     
     def list_tools(self) -> List[str]:
         """List all registered tools"""

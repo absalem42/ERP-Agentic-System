@@ -72,6 +72,19 @@ UI: http://localhost:8501  •  API: http://localhost:8000/docs
 make setup-local   # venv + deps + create_sample_db
 make start-local   # start FastAPI + Streamlit
 ```
+This keeps the original split architecture:
+- Streamlit UI: `http://localhost:8501`
+- FastAPI backend: `http://localhost:8000`
+
+### Single-app Streamlit mode
+```bash
+cd erp_system
+streamlit run frontend/streamlit_app.py
+```
+If `API_URL` is unset, the app switches to direct hosted mode:
+- Streamlit talks directly to the ERP runtime layer
+- A writable demo DB is copied from `databases/erp_sample.db`
+- `GOOGLE_API_KEY` is optional but enables the full LLM-backed agents
 
 ### Health & Logs
 ```bash
@@ -111,11 +124,46 @@ erp_system/
 ## 🔐 Configuration
 - `.env` (copy from `.env.example`)
    - `GOOGLE_API_KEY=...`
-   - `DB_PATH=databases/erp_sample.db` (optional; Docker sets `/app/databases/erp.db`)
+   - `DB_PATH=databases/erp_sample.db` for local or Docker overrides
+   - `ERP_RUNTIME_MODE=direct` for single-app Streamlit hosting
+   - `API_URL=http://backend:8000` only when Streamlit should call a separate backend
 
-## � Deployment
-- Docker (recommended): `make docker`
-- Production tip: front a reverse proxy (nginx) and persist volumes for `databases/` and `logs/`
+## 🌐 Deployment
+### Streamlit Community Cloud
+Recommended free public deployment.
+
+Process:
+1. Push the repo to GitHub.
+2. In Streamlit Community Cloud, point the app to `erp_system/frontend/streamlit_app.py`.
+3. Add `GOOGLE_API_KEY` in Streamlit secrets if you want full Gemini-backed agents.
+4. Leave `API_URL` unset so the app runs in direct hosted mode.
+
+Notes:
+- The app copies `databases/erp_sample.db` to a writable runtime location automatically.
+- Chat memory and SQLite writes are demo-grade and may reset between restarts.
+
+### Hugging Face Docker Space
+Optional free deployment that preserves the split architecture internally.
+
+Process:
+1. Create a Docker Space from this repo.
+2. Set `APP_MODE=hf-space`.
+3. Add `GOOGLE_API_KEY` as a Space secret if needed.
+4. Deploy from the repository root. The root `Dockerfile` copies `erp_system/` into the image automatically.
+
+What the Docker Space mode does:
+- Runs FastAPI on `8000`
+- Runs Streamlit on `8501`
+- Runs nginx as the single public entrypoint on `${PORT}` (default `7860`)
+- Serves Streamlit at `/`
+- Proxies FastAPI docs at `/docs` and API routes under `/api/`
+
+### Local Docker
+```bash
+cd erp_system
+make docker
+```
+This keeps the original two-service layout via `docker-compose.yml`.
 
 ---
 

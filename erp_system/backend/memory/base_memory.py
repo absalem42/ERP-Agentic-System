@@ -5,6 +5,7 @@ Implements required memory systems according to specifications
 
 import sqlite3
 import json
+import os
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -13,6 +14,10 @@ from langchain.schema import BaseMessage, HumanMessage, AIMessage
 
 def get_db_path():
     """Get database path"""
+    configured_path = os.getenv("DB_PATH")
+    if configured_path:
+        return Path(configured_path)
+
     return Path(__file__).parent.parent.parent / "databases" / "erp.db"
 
 class RouterGlobalState:
