@@ -81,6 +81,7 @@ class DirectERPService:
         self.sales_tools = SalesTools()
         self._hosted_sales_llm_agent = None
         self._hosted_analytics_llm_agent = None
+        self._hosted_router_llm_enabled = None
         self._sales_agent = None
         self._analytics_agent = None
         self._router_agent = None
@@ -91,12 +92,15 @@ class DirectERPService:
             cursor.execute("SELECT COUNT(*) FROM customers")
             customer_count = cursor.fetchone()[0]
 
+        llm_mode = "groq-hosted" if _hosted_direct_ai_enabled() else "fallback"
+
         return {
             "status": "healthy",
             "database": "connected",
             "customer_count": customer_count,
             "database_path": str(self.runtime_db),
             "mode": "direct",
+            "llm_mode": llm_mode,
             "agents": {
                 "router": "available",
                 "sales": "available",
@@ -124,40 +128,12 @@ class DirectERPService:
         }
 
     def _run_router(self, message: str) -> tuple[str, str]:
-        lower_message = message.lower()
-        customer_count_phrases = ("how many customers", "count customers", "number of customers", "total customers")
-        analytics_keywords = (
-            "revenue",
-            "analytics",
-            "report",
-            "top product",
-            "worst product",
-            "aov",
-            "average order value",
-            "trend",
-            "insight",
-            "top customers by revenue",
-            "sales trend",
-            "performance",
-        )
-        sales_keywords = (
-            "customer",
-            "customers",
-            "lead",
-            "leads",
-            "order",
-            "orders",
-            "ticket",
-            "support",
-        )
-
-        if any(phrase in lower_message for phrase in customer_count_phrases):
-            return "sales", self._run_sales(message)
-        if any(keyword in lower_message for keyword in ["system", "health", "status"]):
-            return "router", self._system_info()
-        if any(keyword in lower_message for keyword in analytics_keywords):
+        route = self._classify_route_with_llm(message)
+        if route == "analytics":
             return "analytics", self._run_analytics(message)
-        if any(keyword in lower_message for keyword in sales_keywords):
+        if route == "router":
+            return "router", self._system_info()
+        if route == "sales":
             return "sales", self._run_sales(message)
 
         router_agent = self._load_router_agent()
@@ -168,12 +144,9 @@ class DirectERPService:
             except Exception:
                 pass
 
-        return "sales", self._run_sales(message)
+        return self._fallback_route(message)
 
     def _run_sales(self, message: str) -> str:
-        if self._should_use_sales_fallback(message):
-            return self.sales_tools.handle(message)
-
         sales_agent = self._load_sales_agent()
         if sales_agent is not None:
             try:
@@ -185,60 +158,17 @@ class DirectERPService:
         return self.sales_tools.handle(message)
 
     def _run_analytics(self, message: str) -> str:
-        if self._should_use_analytics_fallback(message):
-            return self._analytics_fallback(message)
-
         analytics_agent = self._load_analytics_agent()
         if analytics_agent is not None:
             try:
                 result = analytics_agent.invoke({"input": message})
                 output = result["output"]
-                if output and "Analytics fallback is available" not in output:
+                if output:
                     return output
             except Exception:
                 pass
 
         return self._analytics_fallback(message)
-
-    def _should_use_sales_fallback(self, message: str) -> bool:
-        lower_message = message.lower()
-        deterministic_terms = (
-            "show customers",
-            "find customer",
-            "search customer",
-            "customer summary",
-            "how many customers",
-            "count customers",
-            "number of customers",
-            "total customers",
-            "show leads",
-            "score leads",
-            "show orders",
-            "support tickets",
-            "system status",
-        )
-        return any(term in lower_message for term in deterministic_terms)
-
-    def _should_use_analytics_fallback(self, message: str) -> bool:
-        lower_message = message.lower()
-        deterministic_terms = (
-            "revenue by month",
-            "total revenue",
-            "top products by revenue",
-            "worst 5 products by revenue",
-            "worst products by revenue",
-            "lowest products by revenue",
-            "bottom products by revenue",
-            "top customers by revenue",
-            "average order value by month",
-            "aov",
-            "sales trend",
-            "total analysis",
-            "overall analysis",
-            "overall performance",
-            "executive summary",
-        )
-        return any(term in lower_message for term in deterministic_terms)
 
     def _load_sales_agent(self):
         if self._sales_agent is not None:
@@ -280,6 +210,70 @@ class DirectERPService:
             return self._router_agent
         except Exception:
             return None
+
+    def _classify_route_with_llm(self, message: str) -> Optional[str]:
+        if not has_llm_credentials() or not _hosted_direct_ai_enabled():
+            return None
+
+        prompt = (
+            "You are the Router Agent for an ERP assistant.\n"
+            "Classify the user's message into exactly one domain: sales, analytics, or router.\n"
+            "Rules:\n"
+            "- sales: customers, orders, leads, CRM, support tickets\n"
+            "- analytics: revenue, KPIs, summaries, reports, trends, product performance, executive analysis\n"
+            "- router: system status, health, configuration, app/runtime status\n"
+            "Return only one word: sales, analytics, or router.\n\n"
+            f"Message: {message}\n"
+            "Label:"
+        )
+        try:
+            raw = self._coerce_llm_output(get_llm().invoke(prompt)).strip().lower()
+            for label in ("sales", "analytics", "router"):
+                if label in raw:
+                    return label
+        except Exception:
+            return None
+        return None
+
+    def _fallback_route(self, message: str) -> tuple[str, str]:
+        lower_message = message.lower()
+        customer_count_phrases = ("how many customers", "count customers", "number of customers", "total customers")
+        analytics_keywords = (
+            "revenue",
+            "analytics",
+            "report",
+            "top product",
+            "worst product",
+            "aov",
+            "average order value",
+            "trend",
+            "insight",
+            "top customers by revenue",
+            "sales trend",
+            "performance",
+            "analysis",
+            "summary",
+        )
+        sales_keywords = (
+            "customer",
+            "customers",
+            "lead",
+            "leads",
+            "order",
+            "orders",
+            "ticket",
+            "support",
+        )
+
+        if any(phrase in lower_message for phrase in customer_count_phrases):
+            return "sales", self.sales_tools.handle(message)
+        if any(keyword in lower_message for keyword in ["system", "health", "status"]):
+            return "router", self._system_info()
+        if any(keyword in lower_message for keyword in analytics_keywords):
+            return "analytics", self._analytics_fallback(message)
+        if any(keyword in lower_message for keyword in sales_keywords):
+            return "sales", self.sales_tools.handle(message)
+        return "sales", self.sales_tools.handle(message)
 
     def _build_hosted_sales_llm_agent(self):
         if self._hosted_sales_llm_agent is not None:

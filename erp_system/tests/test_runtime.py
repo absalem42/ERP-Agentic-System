@@ -1,6 +1,4 @@
 import sqlite3
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -227,16 +225,42 @@ def test_direct_service_analytics_handles_total_analysis_prompt(runtime_paths, m
     assert "Total Revenue" in result["response"]
 
 
-def test_direct_service_routes_overall_performance_prompts_to_safe_summary(runtime_paths, monkeypatch):
+def test_direct_service_prefers_hosted_analytics_agent_when_available(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
 
+    class FakeAnalyticsAgent:
+        def invoke(self, payload):
+            return {"output": f"AI analytics answer for: {payload['input']}"}
+
+    monkeypatch.setattr(
+        DirectERPService,
+        "_build_hosted_analytics_llm_agent",
+        lambda self: FakeAnalyticsAgent(),
+    )
+
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
     result = service.chat("give me a plain english executive analysis of overall performance", "analytics")
 
     assert result["agent_used"] == "analytics"
-    assert "Executive Summary" in result["response"]
-    assert "Total Revenue" in result["response"]
+    assert result["response"] == "AI analytics answer for: give me a plain english executive analysis of overall performance"
+
+
+def test_router_prefers_ai_classification_when_available(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
+
+    monkeypatch.setattr(DirectERPService, "_classify_route_with_llm", lambda self, message: "analytics")
+    monkeypatch.setattr(DirectERPService, "_run_analytics", lambda self, message: "AI analytics route")
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat("show me performance insights", "router")
+
+    assert result["agent_used"] == "analytics"
+    assert result["response"] == "AI analytics route"

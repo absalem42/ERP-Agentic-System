@@ -144,10 +144,26 @@ Final Answer: I can help you with various tasks. Please specify what you need as
 class DirectGroqLLM(LLM):
     """HTTP-backed Groq client for environments without langchain_groq."""
 
-    api_key: str
+    api_key: str = ""
     model: str = DEFAULT_GROQ_MODEL
     timeout: float = DEFAULT_GROQ_TIMEOUT_SECONDS
     temperature: float = 0.1
+
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = DEFAULT_GROQ_MODEL,
+        timeout: float = DEFAULT_GROQ_TIMEOUT_SECONDS,
+        temperature: float = 0.1,
+    ):
+        try:
+            super().__init__()
+        except Exception:
+            pass
+        object.__setattr__(self, "api_key", api_key)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "timeout", timeout)
+        object.__setattr__(self, "temperature", temperature)
 
     @property
     def _llm_type(self) -> str:

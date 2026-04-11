@@ -9,6 +9,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from frontend.runtime_env import bootstrap_runtime_environment
+
+bootstrap_runtime_environment(getattr(st, "secrets", {}))
+
 from backend.runtime import get_direct_service
 
 API_URL = os.getenv("API_URL")
@@ -136,6 +140,12 @@ mode_label = "Direct Hosted Mode" if RUNTIME_MODE == "direct" else "API Mode"
 st.sidebar.caption(f"Mode: {mode_label}")
 
 if RUNTIME_MODE == "direct":
+    llm_mode = health_data.get("llm_mode", "fallback") if health_data else "fallback"
+    if llm_mode == "groq-hosted":
+        st.sidebar.success("Live AI mode: Groq-backed hosted responses are enabled.")
+    else:
+        st.sidebar.warning("Fallback mode: hosted AI is disabled or no GROQ_API_KEY was loaded.")
+
     st.sidebar.info(
         "This public demo runs Streamlit directly against the ERP runtime layer. "
         "SQLite data is demo-grade and may reset between restarts."
