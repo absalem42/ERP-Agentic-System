@@ -14,6 +14,15 @@ DEFAULT_SAMPLE_DB = PROJECT_ROOT / "databases" / "erp_sample.db"
 DEFAULT_RUNTIME_DB = Path(tempfile.gettempdir()) / "erp_system_demo" / "erp_public_demo.db"
 
 
+def _hosted_direct_ai_enabled() -> bool:
+    """
+    Hosted direct mode prioritizes responsiveness over full agent execution.
+    Opt in explicitly with ERP_ENABLE_DIRECT_AI=1 if you want the Streamlit-hosted
+    demo to call the full Groq-backed agent stack.
+    """
+    return os.getenv("ERP_ENABLE_DIRECT_AI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _ensure_sample_db_exists(sample_db: Path) -> Path:
     if sample_db.exists():
         return sample_db
@@ -139,7 +148,7 @@ class DirectERPService:
         if self._sales_agent is not None:
             return self._sales_agent
 
-        if not has_llm_credentials():
+        if not has_llm_credentials() or not _hosted_direct_ai_enabled():
             return None
 
         try:
@@ -154,7 +163,7 @@ class DirectERPService:
         if self._analytics_agent is not None:
             return self._analytics_agent
 
-        if not has_llm_credentials():
+        if not has_llm_credentials() or not _hosted_direct_ai_enabled():
             return None
 
         try:
@@ -169,7 +178,7 @@ class DirectERPService:
         if self._router_agent is not None:
             return self._router_agent
 
-        if not has_llm_credentials():
+        if not has_llm_credentials() or not _hosted_direct_ai_enabled():
             return None
 
         try:

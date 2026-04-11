@@ -137,3 +137,17 @@ def test_direct_service_analytics_fallback_supports_revenue_queries(runtime_path
     assert result["agent_used"] == "analytics"
     assert "Revenue" in result["response"]
     assert "2024-04" in result["response"]
+
+
+def test_direct_mode_disables_full_ai_agents_by_default(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+
+    assert service._load_router_agent() is None
+    assert service._load_sales_agent() is None
+    assert service._load_analytics_agent() is None
