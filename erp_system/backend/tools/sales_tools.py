@@ -131,11 +131,14 @@ class SalesTools:
     
     def _handle_customer_query(self, text: str) -> str:
         """Handle customer-related queries"""
-        if 'add' in text.lower() or 'create' in text.lower():
+        text_lower = text.lower()
+        if 'add' in text_lower or 'create' in text_lower:
             return self._suggest_add_customer()
-        elif 'search' in text.lower() or 'find' in text.lower():
+        elif 'search' in text_lower or 'find' in text_lower:
             return self._search_customers(text)
-        elif 'summary' in text.lower() or 'stats' in text.lower():
+        elif any(phrase in text_lower for phrase in ['how many', 'count', 'number of', 'total customers']):
+            return self._customer_count()
+        elif 'summary' in text_lower or 'stats' in text_lower:
             return self._customer_summary()
         else:
             return self._list_customers()
@@ -238,6 +241,17 @@ class SalesTools:
             
         except Exception as e:
             return f"Error getting customer summary: {str(e)}"
+
+    def _customer_count(self) -> str:
+        """Return a concise customer count for counting-style questions."""
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM customers")
+                total_count = cursor.fetchone()[0]
+            return f"There are {total_count} customers in the database."
+        except Exception as e:
+            return f"Error getting customer count: {str(e)}"
     
     def _list_customers(self) -> str:
         """List recent customers with basic info"""

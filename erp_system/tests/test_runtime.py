@@ -139,6 +139,19 @@ def test_direct_service_analytics_fallback_supports_revenue_queries(runtime_path
     assert "2024-04" in result["response"]
 
 
+def test_direct_service_routes_customer_count_questions_to_count_response(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat("how many customers do we have", "router")
+
+    assert result["agent_used"] == "sales"
+    assert "There are 2 customers in the database." in result["response"]
+
+
 def test_direct_mode_disables_full_ai_agents_by_default(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
