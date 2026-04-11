@@ -1,7 +1,20 @@
 import os
 from typing import Any, List, Optional
 
-from langchain_core.language_models.llms import LLM
+try:
+    from langchain_core.language_models.llms import LLM
+except Exception:
+    try:
+        from langchain.llms.base import LLM
+    except Exception:
+        class LLM:
+            """Minimal fallback base class for environments without LangChain LLM base exports."""
+
+            def invoke(self, prompt: str, **kwargs: Any):
+                return self._call(prompt, **kwargs)
+
+            def bind(self, **kwargs):
+                return self
 
 try:
     from langchain_core.callbacks.manager import CallbackManagerForLLMRun
