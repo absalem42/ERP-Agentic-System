@@ -1,4 +1,6 @@
 import sqlite3
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -67,7 +69,15 @@ def create_sample_db(path: Path) -> None:
     cursor.executemany(
         "INSERT INTO leads (id, customer_name, contact_email, message, score, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
-            (1, "Wayne Enterprises", "bruce@wayne.example", "Interested in bulk order", 0.9, "new", "2024-04-02 08:30:00"),
+            (
+                1,
+                "Wayne Enterprises",
+                "bruce@wayne.example",
+                "Interested in bulk order",
+                0.9,
+                "new",
+                "2024-04-02 08:30:00",
+            ),
         ],
     )
     cursor.executemany(
@@ -152,15 +162,73 @@ def test_direct_service_routes_customer_count_questions_to_count_response(runtim
     assert "There are 2 customers in the database." in result["response"]
 
 
-def test_direct_mode_disables_full_ai_agents_by_default(runtime_paths, monkeypatch):
+def test_direct_mode_respects_explicit_disable_flag(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
+    monkeypatch.setenv("ERP_ENABLE_DIRECT_AI", "false")
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
 
     assert service._load_router_agent() is None
     assert service._load_sales_agent() is None
     assert service._load_analytics_agent() is None
+
+
+def test_hosted_direct_mode_enables_ai_when_groq_key_is_present(monkeypatch):
+    from backend import runtime
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
+
+    assert runtime._hosted_direct_ai_enabled() is True
+
+
+def test_direct_service_analytics_supports_total_revenue_question(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat("what is our total revenue", "analytics")
+
+    assert result["agent_used"] == "analytics"
+    assert "Total Revenue" in result["response"]
+    assert "$1197.99" in result["response"]
+
+
+def test_direct_service_analytics_supports_worst_products_question(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat("worst 5 products by revenue", "analytics")
+
+    assert result["agent_used"] == "analytics"
+    assert "Worst Products by Revenue" in result["response"]
+    assert "Service A" in result["response"]
+
+
+def test_direct_service_prefers_hosted_analytics_agent_when_available(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
+
+    class FakeAnalyticsAgent:
+        def invoke(self, payload):
+            return {"output": f"AI analytics answer for: {payload['input']}"}
+
+    fake_module = types.SimpleNamespace(create_analytics_agent=lambda: FakeAnalyticsAgent())
+    monkeypatch.setitem(sys.modules, "backend.agents.AnalyticsAgent", fake_module)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat("give me a plain english executive analysis of overall performance", "analytics")
+
+    assert result["agent_used"] == "analytics"
+    assert result["response"] == "AI analytics answer for: give me a plain english executive analysis of overall performance"

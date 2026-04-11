@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional
 
-from .config.llm import has_llm_credentials
+from .config.llm import get_llm, has_llm_credentials
 from .db import get_db
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -14,12 +14,28 @@ DEFAULT_SAMPLE_DB = PROJECT_ROOT / "databases" / "erp_sample.db"
 DEFAULT_RUNTIME_DB = Path(tempfile.gettempdir()) / "erp_system_demo" / "erp_public_demo.db"
 
 
+class _HostedLLMAgent:
+    def __init__(self, responder):
+        self._responder = responder
+
+    def invoke(self, payload: Dict[str, str]) -> Dict[str, str]:
+        return {"output": self._responder(payload["input"])}
+
+
 def _hosted_direct_ai_enabled() -> bool:
     """
-    Hosted direct mode prioritizes responsiveness and deterministic behavior over
-    full agent execution. Keep the Streamlit-hosted demo on the safe path.
+    Enable hosted direct AI when Groq credentials are available, unless the
+    environment explicitly disables it.
     """
-    return False
+    if not has_llm_credentials():
+        return False
+
+    return os.getenv("ERP_ENABLE_DIRECT_AI", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _ensure_sample_db_exists(sample_db: Path) -> Path:
@@ -63,6 +79,8 @@ class DirectERPService:
         from .tools.sales_tools import SalesTools
 
         self.sales_tools = SalesTools()
+        self._hosted_sales_llm_agent = None
+        self._hosted_analytics_llm_agent = None
         self._sales_agent = None
         self._analytics_agent = None
         self._router_agent = None
@@ -106,6 +124,42 @@ class DirectERPService:
         }
 
     def _run_router(self, message: str) -> tuple[str, str]:
+        lower_message = message.lower()
+        customer_count_phrases = ("how many customers", "count customers", "number of customers", "total customers")
+        analytics_keywords = (
+            "revenue",
+            "analytics",
+            "report",
+            "top product",
+            "worst product",
+            "aov",
+            "average order value",
+            "trend",
+            "insight",
+            "top customers by revenue",
+            "sales trend",
+            "performance",
+        )
+        sales_keywords = (
+            "customer",
+            "customers",
+            "lead",
+            "leads",
+            "order",
+            "orders",
+            "ticket",
+            "support",
+        )
+
+        if any(phrase in lower_message for phrase in customer_count_phrases):
+            return "sales", self._run_sales(message)
+        if any(keyword in lower_message for keyword in ["system", "health", "status"]):
+            return "router", self._system_info()
+        if any(keyword in lower_message for keyword in analytics_keywords):
+            return "analytics", self._run_analytics(message)
+        if any(keyword in lower_message for keyword in sales_keywords):
+            return "sales", self._run_sales(message)
+
         router_agent = self._load_router_agent()
         if router_agent is not None:
             try:
@@ -114,14 +168,12 @@ class DirectERPService:
             except Exception:
                 pass
 
-        lower_message = message.lower()
-        if any(keyword in lower_message for keyword in ["revenue", "analytics", "report", "top product", "aov"]):
-            return "analytics", self._run_analytics(message)
-        if any(keyword in lower_message for keyword in ["system", "health", "status"]):
-            return "router", self._system_info()
         return "sales", self._run_sales(message)
 
     def _run_sales(self, message: str) -> str:
+        if self._should_use_sales_fallback(message):
+            return self.sales_tools.handle(message)
+
         sales_agent = self._load_sales_agent()
         if sales_agent is not None:
             try:
@@ -133,15 +185,56 @@ class DirectERPService:
         return self.sales_tools.handle(message)
 
     def _run_analytics(self, message: str) -> str:
+        if self._should_use_analytics_fallback(message):
+            return self._analytics_fallback(message)
+
         analytics_agent = self._load_analytics_agent()
         if analytics_agent is not None:
             try:
                 result = analytics_agent.invoke({"input": message})
-                return result["output"]
+                output = result["output"]
+                if output and "Analytics fallback is available" not in output:
+                    return output
             except Exception:
                 pass
 
         return self._analytics_fallback(message)
+
+    def _should_use_sales_fallback(self, message: str) -> bool:
+        lower_message = message.lower()
+        deterministic_terms = (
+            "show customers",
+            "find customer",
+            "search customer",
+            "customer summary",
+            "how many customers",
+            "count customers",
+            "number of customers",
+            "total customers",
+            "show leads",
+            "score leads",
+            "show orders",
+            "support tickets",
+            "system status",
+        )
+        return any(term in lower_message for term in deterministic_terms)
+
+    def _should_use_analytics_fallback(self, message: str) -> bool:
+        lower_message = message.lower()
+        deterministic_terms = (
+            "revenue by month",
+            "total revenue",
+            "top products by revenue",
+            "worst 5 products by revenue",
+            "worst products by revenue",
+            "lowest products by revenue",
+            "bottom products by revenue",
+            "top customers by revenue",
+            "average order value by month",
+            "aov",
+            "sales trend",
+        )
+        return any(term in lower_message for term in deterministic_terms)
 
     def _load_sales_agent(self):
         if self._sales_agent is not None:
@@ -156,7 +249,8 @@ class DirectERPService:
             self._sales_agent = create_sales_agent_with_chat()
             return self._sales_agent
         except Exception:
-            return None
+            self._sales_agent = self._build_hosted_sales_llm_agent()
+            return self._sales_agent
 
     def _load_analytics_agent(self):
         if self._analytics_agent is not None:
@@ -171,7 +265,8 @@ class DirectERPService:
             self._analytics_agent = create_analytics_agent()
             return self._analytics_agent
         except Exception:
-            return None
+            self._analytics_agent = self._build_hosted_analytics_llm_agent()
+            return self._analytics_agent
 
     def _load_router_agent(self):
         if self._router_agent is not None:
@@ -187,6 +282,70 @@ class DirectERPService:
             return self._router_agent
         except Exception:
             return None
+
+    def _build_hosted_sales_llm_agent(self):
+        if self._hosted_sales_llm_agent is not None:
+            return self._hosted_sales_llm_agent
+
+        def respond(message: str) -> str:
+            context = self._build_sales_context()
+            prompt = (
+                "You are the hosted Sales Agent for an ERP demo.\n"
+                "Use only the provided data snapshot. If the answer is not supported by the snapshot, say so briefly.\n"
+                "Be concise and businesslike.\n\n"
+                f"Sales snapshot:\n{context}\n\n"
+                f"Question: {message}\n"
+                "Answer:"
+            )
+            response = get_llm().invoke(prompt)
+            return self._coerce_llm_output(response)
+
+        self._hosted_sales_llm_agent = _HostedLLMAgent(respond)
+        return self._hosted_sales_llm_agent
+
+    def _build_hosted_analytics_llm_agent(self):
+        if self._hosted_analytics_llm_agent is not None:
+            return self._hosted_analytics_llm_agent
+
+        def respond(message: str) -> str:
+            context = self._build_analytics_context()
+            prompt = (
+                "You are the hosted Analytics Agent for an ERP demo.\n"
+                "Use only the provided business snapshot.\n"
+                "Answer in plain English. Mention concrete figures from the snapshot. "
+                "If there is not enough information, say that clearly instead of inventing facts.\n\n"
+                f"Business snapshot:\n{context}\n\n"
+                f"Question: {message}\n"
+                "Answer:"
+            )
+            response = get_llm().invoke(prompt)
+            return self._coerce_llm_output(response)
+
+        self._hosted_analytics_llm_agent = _HostedLLMAgent(respond)
+        return self._hosted_analytics_llm_agent
+
+    def _build_sales_context(self) -> str:
+        customer_summary = self.sales_tools._customer_summary()
+        recent_orders = self.sales_tools._list_recent_orders()
+        recent_leads = self.sales_tools._list_leads()
+        return f"{customer_summary}\n\n{recent_orders}\n\n{recent_leads}"
+
+    def _build_analytics_context(self) -> str:
+        sections = [
+            self._analytics_fallback("revenue by month"),
+            self._analytics_fallback("what is our total revenue"),
+            self._analytics_fallback("top products by revenue"),
+            self._analytics_fallback("worst 5 products by revenue"),
+            self._analytics_fallback("top customers by revenue"),
+            self._analytics_fallback("average order value by month"),
+            self._analytics_fallback("sales trend"),
+        ]
+        return "\n\n".join(section for section in sections if section)
+
+    def _coerce_llm_output(self, response) -> str:
+        if hasattr(response, "content"):
+            return str(response.content).strip()
+        return str(response).strip()
 
     def _system_info(self) -> str:
         with get_db() as conn:
@@ -225,6 +384,22 @@ class DirectERPService:
                     lines.append(f"• {row['period']}: ${row['revenue']:.2f} across {row['orders']} orders")
                 return "\n".join(lines)
 
+        if "total revenue" in lower_message or ("revenue" in lower_message and "total" in lower_message):
+            rows = self.sales_tools.sales_sql_read(
+                """
+                SELECT
+                    ROUND(COALESCE(SUM(total), 0), 2) AS total_revenue,
+                    COUNT(*) AS order_count
+                FROM orders
+                """
+            )
+            if rows and "error" not in rows[0]:
+                row = rows[0]
+                return (
+                    "💰 **Total Revenue:**\n\n"
+                    f"Our total revenue is ${row['total_revenue']:.2f} across {row['order_count']} orders."
+                )
+
         if "top" in lower_message and "product" in lower_message:
             rows = self.sales_tools.sales_sql_read(
                 """
@@ -244,6 +419,47 @@ class DirectERPService:
                     lines.append(f"{index}. {row['product_name']} - ${row['revenue']:.2f}")
                 return "\n".join(lines)
 
+        if any(keyword in lower_message for keyword in ["worst", "lowest", "bottom"]) and "product" in lower_message:
+            rows = self.sales_tools.sales_sql_read(
+                """
+                SELECT
+                    p.name AS product_name,
+                    ROUND(SUM(oi.quantity * oi.price), 2) AS revenue
+                FROM order_items oi
+                JOIN products p ON p.id = oi.product_id
+                GROUP BY p.id, p.name
+                ORDER BY revenue ASC
+                LIMIT 5
+                """
+            )
+            if rows and "error" not in rows[0]:
+                lines = ["📉 **Worst Products by Revenue:**", ""]
+                for index, row in enumerate(rows, start=1):
+                    lines.append(f"{index}. {row['product_name']} - ${row['revenue']:.2f}")
+                return "\n".join(lines)
+
+        if "top customer" in lower_message or ("top" in lower_message and "customer" in lower_message):
+            rows = self.sales_tools.sales_sql_read(
+                """
+                SELECT
+                    c.name AS customer_name,
+                    ROUND(COALESCE(SUM(o.total), 0), 2) AS revenue,
+                    COUNT(o.id) AS orders
+                FROM customers c
+                LEFT JOIN orders o ON c.id = o.customer_id
+                GROUP BY c.id, c.name
+                ORDER BY revenue DESC
+                LIMIT 5
+                """
+            )
+            if rows and "error" not in rows[0]:
+                lines = ["🏆 **Top Customers by Revenue:**", ""]
+                for index, row in enumerate(rows, start=1):
+                    lines.append(
+                        f"{index}. {row['customer_name']} - ${row['revenue']:.2f} across {row['orders']} orders"
+                    )
+                return "\n".join(lines)
+
         if "aov" in lower_message or "average order value" in lower_message:
             rows = self.sales_tools.sales_sql_read(
                 """
@@ -261,9 +477,32 @@ class DirectERPService:
                     lines.append(f"• {row['period']}: ${row['average_order_value']:.2f}")
                 return "\n".join(lines)
 
+        if "sales trend" in lower_message or ("trend" in lower_message and "sales" in lower_message):
+            rows = self.sales_tools.sales_sql_read(
+                """
+                SELECT
+                    strftime('%Y-%m', created_at) AS period,
+                    ROUND(SUM(total), 2) AS revenue
+                FROM orders
+                GROUP BY strftime('%Y-%m', created_at)
+                ORDER BY period
+                """
+            )
+            if rows and "error" not in rows[0]:
+                start_period = rows[0]["period"]
+                end_period = rows[-1]["period"]
+                start_revenue = rows[0]["revenue"]
+                end_revenue = rows[-1]["revenue"]
+                direction = "upward" if end_revenue >= start_revenue else "downward"
+                lines = ["📈 **Sales Trend Summary:**", ""]
+                lines.append(f"Revenue moved from ${start_revenue:.2f} in {start_period} to ${end_revenue:.2f} in {end_period}.")
+                lines.append(f"The overall trend is {direction}.")
+                return "\n".join(lines)
+
         return (
-            "Analytics fallback is available for revenue by month, top products by revenue, "
-            "and average order value by month. Add a GROQ_API_KEY to enable the full analytics agent."
+            "Analytics fallback supports revenue by month, total revenue, top or worst products by revenue, "
+            "top customers by revenue, average order value by month, and sales trends. "
+            "Set GROQ_API_KEY to enable full analytics AI answers."
         )
 
 

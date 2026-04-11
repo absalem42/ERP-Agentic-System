@@ -1,5 +1,5 @@
 import os
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
 
 try:
     from langchain_core.language_models.llms import LLM
@@ -42,7 +42,7 @@ DEFAULT_GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT_SECONDS", "20"))
 class MockLLM(LLM):
     """Mock LLM for testing or no-provider fallback."""
 
-    _call_count: int = 0
+    _call_count: ClassVar[int] = 0
 
     @property
     def _llm_type(self) -> str:
@@ -141,6 +141,49 @@ Final Answer: I can help you with various tasks. Please specify what you need as
         return self
 
 
+class DirectGroqLLM(LLM):
+    """HTTP-backed Groq client for environments without langchain_groq."""
+
+    api_key: str
+    model: str = DEFAULT_GROQ_MODEL
+    timeout: float = DEFAULT_GROQ_TIMEOUT_SECONDS
+    temperature: float = 0.1
+
+    @property
+    def _llm_type(self) -> str:
+        return "groq-http"
+
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        import requests
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+        }
+        if stop:
+            payload["stop"] = stop
+
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+
+
 def get_groq_model() -> str:
     return os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
 
@@ -151,19 +194,30 @@ def has_llm_credentials() -> bool:
 
 def get_llm():
     """Get the configured LLM instance."""
-    if GROQ_AVAILABLE and has_llm_credentials():
+    if has_llm_credentials():
+        model = get_groq_model()
+        if GROQ_AVAILABLE:
+            try:
+                print(f"Using Groq model: {model}")
+                return ChatGroq(
+                    model=model,
+                    api_key=os.getenv("GROQ_API_KEY"),
+                    temperature=0.1,
+                    timeout=DEFAULT_GROQ_TIMEOUT_SECONDS,
+                    max_retries=1,
+                )
+            except Exception as exc:
+                print(f"Groq configuration error: {exc}")
+
         try:
-            model = get_groq_model()
             print(f"Using Groq model: {model}")
-            return ChatGroq(
-                model=model,
+            return DirectGroqLLM(
                 api_key=os.getenv("GROQ_API_KEY"),
-                temperature=0.1,
+                model=model,
                 timeout=DEFAULT_GROQ_TIMEOUT_SECONDS,
-                max_retries=1,
             )
         except Exception as exc:
-            print(f"Groq configuration error: {exc}")
+            print(f"Groq HTTP fallback error: {exc}")
 
     if OLLAMA_AVAILABLE:
         try:
