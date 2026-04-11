@@ -24,3 +24,18 @@ def test_bootstrap_runtime_environment_does_not_override_existing_env(monkeypatc
     bootstrap_runtime_environment({"GROQ_API_KEY": "secret-key"})
 
     assert os.getenv("GROQ_API_KEY") == "existing-key"
+
+
+def test_bootstrap_runtime_environment_ignores_unavailable_streamlit_secrets(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    class UnavailableSecrets:
+        def __contains__(self, key):
+            raise RuntimeError("secrets.toml missing")
+
+        def __getitem__(self, key):
+            raise RuntimeError("secrets.toml missing")
+
+    bootstrap_runtime_environment(UnavailableSecrets())
+
+    assert os.getenv("GROQ_API_KEY") is None

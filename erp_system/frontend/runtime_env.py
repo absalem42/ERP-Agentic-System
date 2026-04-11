@@ -14,12 +14,19 @@ RUNTIME_ENV_KEYS = (
 
 def bootstrap_runtime_environment(secret_values: Mapping[str, Any] | None = None) -> None:
     """Populate runtime env vars from Streamlit secrets when they are missing."""
-    if not secret_values:
+    if secret_values is None:
         return
 
     for key in RUNTIME_ENV_KEYS:
         if os.getenv(key):
             continue
 
-        if key in secret_values and secret_values[key] is not None:
-            os.environ[key] = str(secret_values[key])
+        try:
+            if key not in secret_values:
+                continue
+            value = secret_values[key]
+        except Exception:
+            continue
+
+        if value is not None:
+            os.environ[key] = str(value)
