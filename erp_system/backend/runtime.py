@@ -16,11 +16,10 @@ DEFAULT_RUNTIME_DB = Path(tempfile.gettempdir()) / "erp_system_demo" / "erp_publ
 
 def _hosted_direct_ai_enabled() -> bool:
     """
-    Hosted direct mode prioritizes responsiveness over full agent execution.
-    Opt in explicitly with ERP_ENABLE_DIRECT_AI=1 if you want the Streamlit-hosted
-    demo to call the full Groq-backed agent stack.
+    Hosted direct mode prioritizes responsiveness and deterministic behavior over
+    full agent execution. Keep the Streamlit-hosted demo on the safe path.
     """
-    return os.getenv("ERP_ENABLE_DIRECT_AI", "").strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _ensure_sample_db_exists(sample_db: Path) -> Path:
