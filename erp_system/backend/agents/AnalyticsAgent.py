@@ -205,11 +205,8 @@ def create_analytics_agent():
         memory=memory,
     )
 
-
-executor = create_analytics_agent()
-
-
 if __name__ == "__main__":
+    executor = create_analytics_agent()
     print("Analytics Agent Ready")
     print(f"Provider: {'Groq' if has_llm_credentials() else 'Fallback'}")
     if has_llm_credentials():

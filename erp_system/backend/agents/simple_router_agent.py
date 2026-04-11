@@ -18,8 +18,8 @@ Architecture:
 - Implements conversation memory for context awareness
 """
 
-import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -43,26 +43,24 @@ except ImportError as e:
     ANALYTICS_AVAILABLE = False
 from memory.base_memory import RouterGlobalState
 
-# Initialize memory and global state
+tool_registry = ToolRegistry()
 global_state = RouterGlobalState()
 
-# Initialize the tool registry and agents
-# The tool registry manages all available tools across agents
-tool_registry = ToolRegistry()
-sales_agent = create_sales_agent_with_chat()
 
-# Initialize Analytics Agent if available
-if ANALYTICS_AVAILABLE and create_analytics_agent:
+@lru_cache(maxsize=1)
+def get_sales_agent():
+    return create_sales_agent_with_chat()
+
+
+@lru_cache(maxsize=1)
+def get_analytics_agent():
+    if not ANALYTICS_AVAILABLE or create_analytics_agent is None:
+        return None
     try:
-        analytics_agent = create_analytics_agent()
-        print("✅ Analytics Agent initialized successfully")
-    except Exception as e:
-        print(f"⚠️ Analytics Agent initialization failed: {e}")
-        analytics_agent = None
-        ANALYTICS_AVAILABLE = False
-else:
-    analytics_agent = None
-    print("⚠️ Analytics Agent not available")
+        return create_analytics_agent()
+    except Exception as exc:
+        print(f"Analytics Agent initialization failed: {exc}")
+        return None
 
 @tool
 def execute_with_sales_agent(user_request: str) -> str:
@@ -86,13 +84,11 @@ def execute_with_sales_agent(user_request: str) -> str:
         - "display leads with high scores"
         - "customer summary report"
     """
-    print(f"🛍️ Routing to Sales Agent: {user_request}")
     try:
-        # Invoke the sales agent with the user request
+        sales_agent = get_sales_agent()
         result = sales_agent.invoke({"input": user_request})
         response = result['output']
-        print(f"Sales Agent Response: {response[:200]}...")  # Log first 200 chars for debugging
-        return response  # Return the actual response content
+        return response
     except Exception as e:
         return f"Sales Agent Error: {str(e)}"
 
@@ -149,12 +145,10 @@ def execute_with_analytics_agent(user_request: str) -> str:
         - "Analyze sales trends"
         - "Create a chart of monthly orders"
     """
-    print(f"📊 Routing to Analytics Agent: {user_request}")
-    
-    if not ANALYTICS_AVAILABLE or analytics_agent is None:
-        print("⚠️ Analytics Agent not available, routing to Sales Agent for analytics queries")
+    analytics_agent = get_analytics_agent()
+    if analytics_agent is None:
         try:
-            # Use sales agent as fallback for analytics queries
+            sales_agent = get_sales_agent()
             result = sales_agent.invoke({"input": f"Analyze and provide insights on: {user_request}"})
             response = result['output']
             return f"📊 Analytics (via Sales Agent): {response}"
@@ -174,9 +168,6 @@ def execute_with_analytics_agent(user_request: str) -> str:
 tool_registry.register_tool(execute_with_sales_agent)
 if ANALYTICS_AVAILABLE:
     tool_registry.register_tool(execute_with_analytics_agent)
-    print("✅ Analytics Agent tool registered")
-else:
-    print("⚠️ Analytics Agent tool not registered - not available")
 tool_registry.register_tool(get_system_info)
 
 # Create the router agent

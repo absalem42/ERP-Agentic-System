@@ -451,10 +451,8 @@ def create_sales_agent_with_chat():
     """Create Sales Agent with chat interface"""
     return SalesAgentWrapper()
 
-# Export the executor
-executor = create_sales_agent()
-
 if __name__ == "__main__":
+    executor = create_sales_agent()
     print("🛍️ Helios Dynamics - Sales Management Agent Ready!")
     print("Ask me about customers, leads, orders, or sales reports.")
     try:

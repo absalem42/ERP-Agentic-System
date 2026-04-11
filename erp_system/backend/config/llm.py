@@ -36,6 +36,7 @@ except ImportError:
     OLLAMA_AVAILABLE = False
 
 DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
+DEFAULT_GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT_SECONDS", "20"))
 
 
 class MockLLM(LLM):
@@ -154,7 +155,13 @@ def get_llm():
         try:
             model = get_groq_model()
             print(f"Using Groq model: {model}")
-            return ChatGroq(model=model, api_key=os.getenv("GROQ_API_KEY"), temperature=0.1)
+            return ChatGroq(
+                model=model,
+                api_key=os.getenv("GROQ_API_KEY"),
+                temperature=0.1,
+                timeout=DEFAULT_GROQ_TIMEOUT_SECONDS,
+                max_retries=1,
+            )
         except Exception as exc:
             print(f"Groq configuration error: {exc}")
 
