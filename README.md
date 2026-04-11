@@ -84,7 +84,7 @@ streamlit run frontend/streamlit_app.py
 If `API_URL` is unset, the app switches to direct hosted mode:
 - Streamlit talks directly to the ERP runtime layer
 - A writable demo DB is copied from `databases/erp_sample.db`
-- `GOOGLE_API_KEY` is optional but enables the full LLM-backed agents
+- `GROQ_API_KEY` is optional but enables the full LLM-backed agents
 
 ### Health & Logs
 ```bash
@@ -123,7 +123,8 @@ erp_system/
 
 ## 🔐 Configuration
 - `.env` (copy from `.env.example`)
-   - `GOOGLE_API_KEY=...`
+   - `GROQ_API_KEY=...`
+   - `GROQ_MODEL=llama-3.1-8b-instant`
    - `DB_PATH=databases/erp_sample.db` for local or Docker overrides
    - `ERP_RUNTIME_MODE=direct` for single-app Streamlit hosting
    - `API_URL=http://backend:8000` only when Streamlit should call a separate backend
@@ -135,8 +136,9 @@ Recommended free public deployment.
 Process:
 1. Push the repo to GitHub.
 2. In Streamlit Community Cloud, point the app to `erp_system/frontend/streamlit_app.py`.
-3. Add `GOOGLE_API_KEY` in Streamlit secrets if you want full Gemini-backed agents.
-4. Leave `API_URL` unset so the app runs in direct hosted mode.
+3. Add `GROQ_API_KEY` in Streamlit secrets if you want full Groq-backed agents.
+4. Optionally add `GROQ_MODEL=llama-3.1-8b-instant` if you want to override the default later.
+5. Leave `API_URL` unset so the app runs in direct hosted mode.
 
 Notes:
 - The app copies `databases/erp_sample.db` to a writable runtime location automatically.
@@ -148,7 +150,7 @@ Optional free deployment that preserves the split architecture internally.
 Process:
 1. Create a Docker Space from this repo.
 2. Set `APP_MODE=hf-space`.
-3. Add `GOOGLE_API_KEY` as a Space secret if needed.
+3. Add `GROQ_API_KEY` as a Space secret if needed.
 4. Deploy from the repository root. The root `Dockerfile` copies `erp_system/` into the image automatically.
 
 What the Docker Space mode does:

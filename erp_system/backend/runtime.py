@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional
 
+from .config.llm import has_llm_credentials
 from .db import get_db
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -138,7 +139,7 @@ class DirectERPService:
         if self._sales_agent is not None:
             return self._sales_agent
 
-        if not os.getenv("GOOGLE_API_KEY"):
+        if not has_llm_credentials():
             return None
 
         try:
@@ -153,7 +154,7 @@ class DirectERPService:
         if self._analytics_agent is not None:
             return self._analytics_agent
 
-        if not os.getenv("GOOGLE_API_KEY"):
+        if not has_llm_credentials():
             return None
 
         try:
@@ -168,7 +169,7 @@ class DirectERPService:
         if self._router_agent is not None:
             return self._router_agent
 
-        if not os.getenv("GOOGLE_API_KEY"):
+        if not has_llm_credentials():
             return None
 
         try:
@@ -254,7 +255,7 @@ class DirectERPService:
 
         return (
             "Analytics fallback is available for revenue by month, top products by revenue, "
-            "and average order value by month. Add a GOOGLE_API_KEY to enable the full analytics agent."
+            "and average order value by month. Add a GROQ_API_KEY to enable the full analytics agent."
         )
 
 

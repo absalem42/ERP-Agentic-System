@@ -17,7 +17,6 @@ from langchain.agents import create_react_agent, AgentExecutor
 from langchain.tools import tool
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain_google_genai import GoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,12 +27,12 @@ from config.llm import get_llm
 from dotenv import load_dotenv
 load_dotenv()
 
-# Set Gemini API key with proper error handling
-google_api_key = os.getenv("GOOGLE_API_KEY")
-if google_api_key:
-    os.environ["GOOGLE_API_KEY"] = google_api_key
+# Set Groq API key with proper error handling
+groq_api_key = os.getenv("GROQ_API_KEY")
+if groq_api_key:
+    os.environ["GROQ_API_KEY"] = groq_api_key
 else:
-    print("⚠️  WARNING: GOOGLE_API_KEY not found in environment. Sales agent may not work properly.")
+    print("WARNING: GROQ_API_KEY not found in environment. Sales agent may fall back to non-AI mode.")
 
 # Import memory systems
 from memory.base_memory import SalesEntityMemory, RouterGlobalState

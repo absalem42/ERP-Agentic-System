@@ -7,7 +7,8 @@ services:
     environment:
       - DB_PATH=/app/databases/erp.db
       - PYTHONPATH=/app/backend
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
     env_file:
       - .env
     volumes:
@@ -30,7 +31,8 @@ services:
     environment:
       - PYTHONPATH=/app/backend
       - API_URL=http://backend:8000
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_SERVER_ENABLE_CORS=false
       - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false

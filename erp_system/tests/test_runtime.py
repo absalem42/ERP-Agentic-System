@@ -115,7 +115,7 @@ def test_direct_service_routes_customer_queries_without_api(runtime_paths, monke
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
     result = service.chat("show customers", "router")
@@ -129,7 +129,7 @@ def test_direct_service_analytics_fallback_supports_revenue_queries(runtime_path
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
     result = service.chat("revenue by month", "analytics")
