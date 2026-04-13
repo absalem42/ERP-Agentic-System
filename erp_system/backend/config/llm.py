@@ -13,6 +13,7 @@ from backend.config.env import load_environment
 load_environment()
 
 DEFAULT_AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+PROJECT_DEFAULT_AZURE_OPENAI_DEPLOYMENT = "gpt-4.1"
 
 
 @dataclass
@@ -80,10 +81,18 @@ def _extract_endpoint_parts(value: str) -> tuple[str, str, str]:
     return endpoint.rstrip("/"), deployment, api_version
 
 
+def _resolve_deployment_name() -> str:
+    for env_key in ("AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_MODEL", "OPENAI_MODEL"):
+        value = os.getenv(env_key, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def resolve_azure_openai_settings() -> dict[str, str]:
     api_key = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
+    deployment = _resolve_deployment_name()
     api_version = os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_OPENAI_API_VERSION).strip()
 
     target_uri = os.getenv("AZURE_OPENAI_TARGET_URI", "").strip()
@@ -93,6 +102,11 @@ def resolve_azure_openai_settings() -> dict[str, str]:
         endpoint = parsed_endpoint or endpoint
         deployment = deployment or parsed_deployment
         api_version = parsed_version or api_version
+
+    # Azure requires a deployment name. This project's public demo uses `gpt-4.1`
+    # unless explicitly overridden in the environment.
+    if api_key and endpoint and not deployment:
+        deployment = PROJECT_DEFAULT_AZURE_OPENAI_DEPLOYMENT
 
     return {
         "api_key": api_key,

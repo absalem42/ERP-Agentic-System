@@ -43,3 +43,20 @@ def test_bootstrap_runtime_environment_ignores_unavailable_streamlit_secrets(mon
     bootstrap_runtime_environment(UnavailableSecrets())
 
     assert os.getenv("AZURE_OPENAI_API_KEY") is None
+
+
+def test_bootstrap_runtime_environment_copies_model_aliases(monkeypatch):
+    from frontend.runtime_env import bootstrap_runtime_environment
+
+    monkeypatch.delenv("AZURE_OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    bootstrap_runtime_environment(
+        {
+            "AZURE_OPENAI_MODEL": "gpt-4.1",
+            "OPENAI_MODEL": "ignored-because-env-is-empty-too",
+        }
+    )
+
+    assert os.getenv("AZURE_OPENAI_MODEL") == "gpt-4.1"
+    assert os.getenv("OPENAI_MODEL") == "ignored-because-env-is-empty-too"
