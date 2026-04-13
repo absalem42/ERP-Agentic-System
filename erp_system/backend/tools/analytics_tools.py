@@ -248,6 +248,17 @@ class AnalyticsTools:
             or "monthly revenue" in lowered
             or ("revenue" in lowered and "trend" in lowered)
         ):
+            if "last 6 month" in lowered or "last six month" in lowered:
+                return {
+                    "sql": (
+                        "WITH monthly AS ("
+                        " SELECT strftime('%Y-%m', created_at) AS period, ROUND(SUM(total), 2) AS revenue"
+                        " FROM orders GROUP BY strftime('%Y-%m', created_at)"
+                        ") SELECT period, revenue FROM monthly ORDER BY period DESC LIMIT 6"
+                    ),
+                    "params": (),
+                    "meta": {"analysis_type": "monthly_revenue_trend_last_6"},
+                }
             return {
                 "sql": (
                     "SELECT strftime('%Y-%m', created_at) AS period, ROUND(SUM(total), 2) AS revenue "
@@ -255,6 +266,26 @@ class AnalyticsTools:
                 ),
                 "params": (),
                 "meta": {"analysis_type": "monthly_revenue_trend"},
+            }
+        if "products below" in lowered and "reorder point" in lowered:
+            return {
+                "sql": (
+                    "SELECT p.sku, p.name, s.qty_on_hand, s.reorder_point "
+                    "FROM stock s JOIN products p ON p.id = s.product_id "
+                    "WHERE s.qty_on_hand < s.reorder_point ORDER BY p.id"
+                ),
+                "params": (),
+                "meta": {"analysis_type": "products_below_rop"},
+            }
+        if "trial balance" in lowered:
+            return {
+                "sql": (
+                    "SELECT account, ROUND(SUM(debit), 2) AS total_debit, "
+                    "ROUND(SUM(credit), 2) AS total_credit "
+                    "FROM ledger_lines GROUP BY account ORDER BY account"
+                ),
+                "params": (),
+                "meta": {"analysis_type": "trial_balance"},
             }
         if (
             "top products" in lowered
@@ -373,5 +404,14 @@ class AnalyticsTools:
                     f"Monthly order revenue covers {len(rows)} periods. Revenue ranges from "
                     f"{min(values):.2f} to {max(values):.2f} across the available sample history."
                 )
+            if meta.get("analysis_type") == "monthly_revenue_trend_last_6":
+                return (
+                    f"Monthly order revenue for the last {len(rows)} available periods ranges from "
+                    f"{min(values):.2f} to {max(values):.2f}."
+                )
+            if meta.get("analysis_type") == "trial_balance":
+                return "Trial balance summarizes debits and credits by account from posted ledger lines."
+            if meta.get("analysis_type") == "products_below_rop":
+                return f"{len(rows)} products are currently below their reorder point."
             return f"The dataset contains {len(rows)} rows. The {key} values range from {min(values):.2f} to {max(values):.2f}."
         return f"The dataset contains {len(rows)} rows."

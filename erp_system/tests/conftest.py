@@ -151,6 +151,48 @@ CREATE TABLE payments (
     received_at DATETIME
 );
 
+CREATE TABLE vendors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT,
+    phone TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE vendor_bills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER NOT NULL,
+    bill_number TEXT,
+    issue_date DATE,
+    due_date DATE,
+    total_amount REAL,
+    status TEXT DEFAULT 'unpaid',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE vendor_bill_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_bill_id INTEGER NOT NULL,
+    description TEXT,
+    quantity INTEGER,
+    unit_price REAL
+);
+
+CREATE TABLE vendor_bill_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER,
+    amount REAL,
+    method TEXT,
+    paid_at DATETIME
+);
+
+CREATE TABLE vendor_bill_allocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id INTEGER,
+    vendor_bill_id INTEGER,
+    amount REAL
+);
+
 CREATE TABLE payment_allocations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     payment_id INTEGER,
@@ -329,6 +371,9 @@ def create_test_db(path: Path) -> None:
         [
             ("Cash", "Cash on hand"),
             ("Accounts Receivable", "Receivables from customers"),
+            ("Accounts Payable", "Payables to vendors"),
+            ("Office Expense", "Operating expenses"),
+            ("Inventory Asset", "Inventory holdings"),
             ("Revenue", "Sales revenue"),
         ],
     )
@@ -352,6 +397,13 @@ def create_test_db(path: Path) -> None:
         [
             (1, "Supply Hub", "sales@supplyhub.example", "+971400000001"),
             (2, "Northwind Parts", "ops@northwind.example", "+971400000002"),
+        ],
+    )
+    cursor.executemany(
+        "INSERT INTO vendors (id, name, email, phone, created_at) VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "Mohamed Hussein Supplies", "ops@mohamedhussain.example", "+971400000003", "2025-01-04 09:00:00"),
+            (2, "Gulf Industrial Vendors", "ap@gulfvendors.example", "+971400000004", "2025-01-04 09:15:00"),
         ],
     )
     cursor.executemany(
@@ -386,6 +438,23 @@ def create_test_db(path: Path) -> None:
             ("finance_anomaly", "v1", "models/finance_anomaly.pkl", "2025-01-01 10:05:00"),
             ("inventory_forecast", "v1", "models/inventory_forecast.pkl", "2025-01-01 10:10:00"),
             ("lead_score", "v1", "models/lead_score.pkl", "2025-01-01 10:15:00"),
+        ],
+    )
+    cursor.executemany(
+        "INSERT INTO saved_reports (title, sql) VALUES (?, ?)",
+        [
+            (
+                "Monthly Revenue",
+                "SELECT strftime('%Y-%m', created_at) AS period, ROUND(SUM(total), 2) AS revenue FROM orders GROUP BY strftime('%Y-%m', created_at) ORDER BY period",
+            ),
+            (
+                "Products Below ROP",
+                "SELECT p.sku, p.name, s.qty_on_hand, s.reorder_point FROM stock s JOIN products p ON p.id = s.product_id WHERE s.qty_on_hand < s.reorder_point ORDER BY p.id",
+            ),
+            (
+                "Trial Balance",
+                "SELECT account, ROUND(SUM(debit), 2) AS total_debit, ROUND(SUM(credit), 2) AS total_credit FROM ledger_lines GROUP BY account ORDER BY account",
+            ),
         ],
     )
 

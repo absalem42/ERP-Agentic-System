@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -115,6 +116,18 @@ def list_saved_reports() -> list[dict]:
     return response.json()["saved_reports"]
 
 
+def run_saved_report(title: str, user_id: int, session_id: str) -> dict:
+    if DIRECT_MODE:
+        return direct_service.run_saved_report(title, user_id=user_id, session_id=session_id)
+    response = requests.post(
+        f"{API_URL}/saved-reports/{quote(title, safe='')}/run",
+        params={"user_id": user_id, "session_id": session_id},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def call_agent(message: str, agent_name: str, user_id: int, session_id: str) -> dict:
     if DIRECT_MODE:
         return direct_service.chat(message, agent_name, user_id=user_id, session_id=session_id)
@@ -207,6 +220,10 @@ st.markdown('<h1 class="main-header">🚀 ERP Chat Assistant - Live Development!
 if not health_data:
     st.error("Agents not available. Please check the backend or runtime configuration.")
     st.stop()
+
+st.caption(
+    f"Build {health_data.get('app_version', 'dev')} · Provider: {str(health_data.get('provider_mode', 'fallback')).upper()}"
+)
 
 debug_col, _ = st.columns([1, 5])
 with debug_col:
@@ -356,7 +373,30 @@ if panel_visibility["show_saved_reports"]:
         reports = list_saved_reports()
         if reports:
             for report in reports:
-                st.markdown(f"**{report['title']}**")
+                title_col, run_col = st.columns([5, 1])
+                with title_col:
+                    st.markdown(f"**{report['title']}**")
+                with run_col:
+                    if st.button("Run", key=f"run-report-{report['id']}", width="stretch"):
+                        st.session_state.messages.append(
+                            {"role": "user", "content": f"Run saved report: {report['title']}"}
+                        )
+                        result = run_saved_report(report["title"], int(st.session_state.user_id), st.session_state.session_id)
+                        agent_used = str(result.get("agent_used", "analytics")).strip().lower() or "analytics"
+                        st.session_state.last_agent_used = agent_used
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": result.get("response", "No response received"),
+                                "agent_used": agent_used,
+                                "agent_label": assistant_title(agent_used),
+                                "chart_spec": result.get("chart_spec"),
+                                "rows": result.get("rows"),
+                                "tool_calls": result.get("tool_calls", []),
+                                "approval_required": result.get("approval_required"),
+                            }
+                        )
+                        st.rerun()
                 st.code(report["sql"])
         else:
             st.info("No saved reports yet.")

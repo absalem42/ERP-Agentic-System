@@ -35,6 +35,23 @@ class FinanceTools:
             read_only=False,
         )
         self.registry.register_tool(
+            name="post_vendor_bill_tool",
+            handler=self.post_vendor_bill_tool,
+            description="Post a vendor/AP bill and supporting line items",
+            input_schema={"vendor_id": "int", "lines": "list[dict]", "due_date": "str | None"},
+            module="finance",
+            read_only=False,
+            requires_approval=True,
+        )
+        self.registry.register_tool(
+            name="record_vendor_payment_tool",
+            handler=self.record_vendor_payment_tool,
+            description="Record a vendor bill payment and allocation",
+            input_schema={"vendor_id": "int", "vendor_bill_id": "int", "amount": "float", "method": "str"},
+            module="finance",
+            read_only=False,
+        )
+        self.registry.register_tool(
             name="post_journal_tool",
             handler=self.post_journal_tool,
             description="Post a manual double-entry journal",
@@ -53,6 +70,13 @@ class FinanceTools:
             name="policy_rag_tool",
             handler=self.policy_rag_tool,
             description="Retrieve finance policy and glossary context",
+            input_schema={"query": "str"},
+            module="finance",
+        )
+        self.registry.register_tool(
+            name="finance_query_tool",
+            handler=self.finance_query_tool,
+            description="Run finance read queries such as trial balance and payables summaries",
             input_schema={"query": "str"},
             module="finance",
         )
@@ -186,6 +210,122 @@ class FinanceTools:
         }
         return self._log("record_payment_tool", payload, result)
 
+    def post_vendor_bill_tool(self, payload: dict[str, Any], requested_by: str = "system", approved: bool = False) -> dict[str, Any]:
+        payload = self._normalize_vendor_bill_payload(payload)
+        reference_error = self._validate_vendor_references(payload)
+        if reference_error:
+            result = {"message": reference_error}
+            return self._log("post_vendor_bill_tool", payload, result)
+
+        anomaly = self.anomaly_detector_tool(payload)
+        total_amount = anomaly["total_amount"]
+        if anomaly["is_risky"] and not approved:
+            approval = self.state_store.create_approval(
+                "finance",
+                {"action": "post_vendor_bill", "payload": payload},
+                requested_by,
+            )
+            result = {
+                "message": "Vendor bill requires approval before posting.",
+                "approval_required": approval,
+                "total_amount": total_amount,
+            }
+            return self._log("post_vendor_bill_tool", payload, result)
+
+        bill_number = payload.get("bill_number") or self._next_vendor_bill_number()
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO vendor_bills (vendor_id, bill_number, issue_date, due_date, total_amount, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    payload["vendor_id"],
+                    bill_number,
+                    payload.get("issue_date"),
+                    payload.get("due_date"),
+                    total_amount,
+                    payload.get("status", "unpaid"),
+                ),
+            )
+            vendor_bill_id = int(cursor.lastrowid)
+            for line in payload.get("lines", []):
+                cursor.execute(
+                    """
+                    INSERT INTO vendor_bill_lines (vendor_bill_id, description, quantity, unit_price)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (vendor_bill_id, line["description"], line["quantity"], line["unit_price"]),
+                )
+            conn.commit()
+
+        expense_account = payload.get("expense_account") or "Office Expense"
+        journal = self.post_journal_tool(
+            {
+                "entry_date": payload.get("issue_date"),
+                "lines": [
+                    {"account": expense_account, "debit": total_amount, "credit": 0.0},
+                    {"account": "Accounts Payable", "debit": 0.0, "credit": total_amount},
+                ],
+            }
+        )
+        result = {
+            "message": f"Vendor bill posted with id {vendor_bill_id} and number {bill_number}.",
+            "vendor_bill_id": vendor_bill_id,
+            "bill_number": bill_number,
+            "total_amount": total_amount,
+            "journal_entry_id": journal.get("entry_id"),
+        }
+        return self._log("post_vendor_bill_tool", payload, result)
+
+    def record_vendor_payment_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO vendor_bill_payments (vendor_id, amount, method, paid_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (payload["vendor_id"], payload["amount"], payload.get("method"), payload.get("paid_at")),
+            )
+            payment_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO vendor_bill_allocations (payment_id, vendor_bill_id, amount)
+                VALUES (?, ?, ?)
+                """,
+                (payment_id, payload["vendor_bill_id"], payload["amount"]),
+            )
+            cursor.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM vendor_bill_allocations WHERE vendor_bill_id = ?",
+                (payload["vendor_bill_id"],),
+            )
+            allocated = float(cursor.fetchone()[0])
+            cursor.execute("SELECT total_amount FROM vendor_bills WHERE id = ?", (payload["vendor_bill_id"],))
+            bill_row = cursor.fetchone()
+            bill_total = float(bill_row[0]) if bill_row and bill_row[0] is not None else 0.0
+            status = "paid" if allocated >= bill_total else "partial"
+            cursor.execute("UPDATE vendor_bills SET status = ? WHERE id = ?", (status, payload["vendor_bill_id"]))
+            conn.commit()
+
+        journal = self.post_journal_tool(
+            {
+                "entry_date": payload.get("paid_at", "")[:10],
+                "lines": [
+                    {"account": "Accounts Payable", "debit": float(payload["amount"]), "credit": 0.0},
+                    {"account": "Cash", "debit": 0.0, "credit": float(payload["amount"])},
+                ],
+            }
+        )
+        result = {
+            "message": f"Vendor payment recorded with id {payment_id}.",
+            "payment_id": payment_id,
+            "vendor_bill_status": status,
+            "journal_entry_id": journal.get("entry_id"),
+        }
+        return self._log("record_vendor_payment_tool", payload, result)
+
     def post_journal_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
         line_items = payload.get("lines", [])
         if not line_items:
@@ -251,32 +391,64 @@ class FinanceTools:
         }
         return self._log("policy_rag_tool", {"query": query}, result)
 
+    def finance_query_tool(self, query: str) -> dict[str, Any]:
+        lowered = query.lower()
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            if "trial balance" in lowered or ("account" in lowered and "balance" in lowered):
+                cursor.execute(
+                    """
+                    SELECT account,
+                           ROUND(SUM(debit), 2) AS total_debit,
+                           ROUND(SUM(credit), 2) AS total_credit
+                    FROM ledger_lines
+                    GROUP BY account
+                    ORDER BY account
+                    """
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                message = "Trial Balance"
+            elif "payable" in lowered or "vendor bill" in lowered:
+                cursor.execute(
+                    """
+                    SELECT vb.id, v.name AS vendor_name, vb.bill_number, vb.total_amount, vb.status, vb.due_date
+                    FROM vendor_bills vb
+                    JOIN vendors v ON v.id = vb.vendor_id
+                    ORDER BY vb.id DESC
+                    LIMIT 10
+                    """
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                message = "Vendor Bills"
+            else:
+                rows = []
+                message = "No finance read query matched."
+        result = {"message": message, "rows": rows}
+        return self._log("finance_query_tool", {"query": query}, result)
+
     def handle(self, message: str, requested_by: str = "system") -> dict[str, Any]:
         lowered = message.lower().strip()
         if lowered.startswith("post invoice") and looks_like_json_payload(message):
             return self.post_invoice_tool(extract_json_payload(message), requested_by=requested_by)
+        if lowered.startswith("post vendor bill") and looks_like_json_payload(message):
+            return self.post_vendor_bill_tool(extract_json_payload(message), requested_by=requested_by)
         if lowered.startswith("record payment") and looks_like_json_payload(message):
             return self.record_payment_tool(extract_json_payload(message))
+        if lowered.startswith("record vendor payment") and looks_like_json_payload(message):
+            return self.record_vendor_payment_tool(extract_json_payload(message))
         if lowered.startswith("post journal") and looks_like_json_payload(message):
             return self.post_journal_tool(extract_json_payload(message))
-        if "invoice" in lowered and "vendor" in lowered:
-            unsupported = {
-                "message": (
-                    "The current finance workflow supports customer invoices only. "
-                    "Vendor/AP invoices are not modeled in this schema yet. Use an existing customer_id "
-                    "for billing workflows."
-                )
-            }
-            return self._log(
-                "unsupported_finance_intent",
-                {"query": message, "unsupported_intent": "vendor_invoice"},
-                unsupported,
-            )
+        if "trial balance" in lowered or ("account" in lowered and "balance" in lowered):
+            return self.finance_query_tool(message)
         planned = self._llm_plan(message)
         if planned:
             planned_result = self._dispatch_planned_action(planned, message, requested_by)
             if planned_result is not None:
                 return planned_result
+        if "vendor" in lowered or "payable" in lowered:
+            heuristic_vendor = self._heuristic_vendor_bill_plan(message)
+            if heuristic_vendor is not None:
+                return self.post_vendor_bill_tool(heuristic_vendor, requested_by=requested_by)
         return self.policy_rag_tool(message)
 
     def execute_approved_payload(self, approval_payload: dict[str, Any], requested_by: str = "system") -> dict[str, Any]:
@@ -284,6 +456,8 @@ class FinanceTools:
         payload = approval_payload.get("payload") if "payload" in approval_payload else approval_payload
         if action == "post_invoice" or {"customer_id", "lines"} <= set(payload):
             return self.post_invoice_tool(payload, requested_by=requested_by, approved=True)
+        if action == "post_vendor_bill" or {"vendor_id", "lines"} <= set(payload):
+            return self.post_vendor_bill_tool(payload, requested_by=requested_by, approved=True)
         return {"message": "No executable finance action found for approval."}
 
     def _normalize_invoice_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -298,6 +472,24 @@ class FinanceTools:
             if raw_order_id != normalized["order_id"]:
                 normalized["_raw_order_id"] = raw_order_id
         issue_date = normalized.get("issue_date") or normalized.get("entry_date")
+        if not issue_date:
+            due_date = normalized.get("due_date")
+            if isinstance(due_date, str) and due_date:
+                issue_date = due_date[:10]
+            else:
+                issue_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        normalized["issue_date"] = issue_date[:10] if isinstance(issue_date, str) else issue_date
+        return normalized
+
+    def _normalize_vendor_bill_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        raw_vendor_id = normalized.get("vendor_id")
+        normalized["vendor_id"] = self._coerce_int(raw_vendor_id)
+        if raw_vendor_id != normalized["vendor_id"]:
+            normalized["_raw_vendor_id"] = raw_vendor_id
+            if isinstance(raw_vendor_id, str) and raw_vendor_id.strip():
+                normalized["vendor_name"] = raw_vendor_id.strip().replace("_", " ")
+        issue_date = normalized.get("issue_date")
         if not issue_date:
             due_date = normalized.get("due_date")
             if isinstance(due_date, str) and due_date:
@@ -330,6 +522,56 @@ class FinanceTools:
 
         return None
 
+    def _validate_vendor_references(self, payload: dict[str, Any]) -> str | None:
+        payload = self._resolve_vendor_reference(payload)
+        vendor_id = payload.get("vendor_id")
+        if vendor_id is None:
+            raw_vendor_id = payload.get("_raw_vendor_id")
+            if raw_vendor_id is not None:
+                return f"Unknown vendor reference: {raw_vendor_id}. Provide an existing vendor_id."
+            return "Vendor bill payload must include a valid existing vendor_id."
+
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM vendors WHERE id = ?", (vendor_id,))
+            if cursor.fetchone() is None:
+                return f"Unknown vendor reference: {payload.get('vendor_id')}. Provide an existing vendor_id."
+
+        return None
+
+    def _resolve_vendor_reference(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("vendor_id") is not None:
+            return payload
+
+        vendor_name = payload.get("vendor_name") or payload.get("_raw_vendor_id")
+        if not isinstance(vendor_name, str) or not vendor_name.strip():
+            return payload
+
+        normalized_name = vendor_name.strip().replace("_", " ")
+        if normalized_name.lower() in {"new vendor", "vendor", "new"}:
+            normalized_name = "New Vendor"
+
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM vendors WHERE lower(name) = lower(?)", (normalized_name,))
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    INSERT INTO vendors (name, email, phone, created_at)
+                    VALUES (?, NULL, NULL, CURRENT_TIMESTAMP)
+                    """,
+                    (normalized_name,),
+                )
+                conn.commit()
+                vendor_id = int(cursor.lastrowid)
+            else:
+                vendor_id = int(row[0])
+
+        payload["vendor_id"] = vendor_id
+        payload["vendor_name"] = normalized_name
+        return payload
+
     def _coerce_int(self, value: Any) -> int | None:
         if value is None or value == "":
             return None
@@ -354,10 +596,14 @@ class FinanceTools:
             "Choose exactly one action and return only JSON.\n"
             "Allowed actions:\n"
             "- post_invoice: payload needs customer_id, order_id optional, issue_date optional, due_date optional, lines[{description, quantity, unit_price}]\n"
+            "- post_vendor_bill: payload needs vendor_id, issue_date optional, due_date optional, lines[{description, quantity, unit_price}]\n"
             "- record_payment: payload needs customer_id, invoice_id, amount, method, received_at optional\n"
+            "- record_vendor_payment: payload needs vendor_id, vendor_bill_id, amount, method, paid_at optional\n"
             "- post_journal: payload needs entry_date and lines[{account, debit, credit}]\n"
+            "- finance_query: payload needs query for trial balance or payable summaries\n"
             "- policy_rag: payload needs query\n"
-            "If the user asks to create or post an invoice, choose post_invoice.\n"
+            "If the user asks to create or post a vendor bill or accounts payable invoice, choose post_vendor_bill.\n"
+            "If the user asks to create or post an invoice for a customer, choose post_invoice.\n"
             "Return only JSON.\n"
             f"User message: {message}"
         )
@@ -376,10 +622,22 @@ class FinanceTools:
         payload = planned.get("payload") or {}
         if action == "post_invoice" and {"customer_id", "lines"} <= set(payload):
             return self.post_invoice_tool(payload, requested_by=requested_by)
+        if action == "post_vendor_bill":
+            if payload.get("vendor_id") is None:
+                recovered_payload = self._heuristic_vendor_bill_plan(message)
+                if recovered_payload is not None:
+                    return self.post_vendor_bill_tool(recovered_payload, requested_by=requested_by)
+            if "lines" in payload:
+                return self.post_vendor_bill_tool(payload, requested_by=requested_by)
         if action == "record_payment" and {"customer_id", "invoice_id", "amount"} <= set(payload):
             return self.record_payment_tool(payload)
+        if action == "record_vendor_payment" and {"vendor_id", "vendor_bill_id", "amount"} <= set(payload):
+            return self.record_vendor_payment_tool(payload)
         if action == "post_journal" and {"entry_date", "lines"} <= set(payload):
             return self.post_journal_tool(payload)
+        if action == "finance_query":
+            query = payload.get("query") or message
+            return self.finance_query_tool(query)
         if action == "policy_rag":
             query = payload.get("query") or message
             return self.policy_rag_tool(query)
@@ -391,3 +649,36 @@ class FinanceTools:
             cursor.execute("SELECT COUNT(*) FROM invoices")
             count = int(cursor.fetchone()[0]) + 1
         return f"INV-{count:05d}"
+
+    def _next_vendor_bill_number(self) -> str:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM vendor_bills")
+            count = int(cursor.fetchone()[0]) + 1
+        return f"BILL-{count:05d}"
+
+    def _heuristic_vendor_bill_plan(self, message: str) -> dict[str, Any] | None:
+        lowered = message.lower()
+        if "vendor" not in lowered and "payable" not in lowered:
+            return None
+        amount_match = __import__("re").search(r"(\d+(?:\.\d+)?)", message)
+        amount = float(amount_match.group(1)) if amount_match else 0.0
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM vendors ORDER BY id LIMIT 1")
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    INSERT INTO vendors (name, email, phone, created_at)
+                    VALUES ('New Vendor', NULL, NULL, CURRENT_TIMESTAMP)
+                    """
+                )
+                conn.commit()
+                vendor_id = int(cursor.lastrowid)
+            else:
+                vendor_id = int(row[0])
+        return {
+            "vendor_id": vendor_id,
+            "lines": [{"description": "Vendor bill", "quantity": 1, "unit_price": amount or self.HIGH_RISK_AMOUNT}],
+        }

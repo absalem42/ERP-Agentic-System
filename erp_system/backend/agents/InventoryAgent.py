@@ -14,6 +14,7 @@ class InventoryAgent:
         return {
             "output": result["message"],
             "approval_required": result.get("approval_required"),
+            "rows": result.get("rows"),
         }
 
 

@@ -71,7 +71,34 @@ class InventoryTools:
         lowered = message.lower()
         with get_db(self.db_path) as conn:
             cursor = conn.cursor()
-            if "supplier" in lowered:
+            if "below their reorder point" in lowered or "below reorder point" in lowered or "reorder point" in lowered:
+                cursor.execute(
+                    """
+                    SELECT p.id AS product_id, p.sku, p.name, s.qty_on_hand, s.reorder_point,
+                           (s.reorder_point - s.qty_on_hand) AS shortage
+                    FROM stock s
+                    JOIN products p ON p.id = s.product_id
+                    WHERE s.qty_on_hand < s.reorder_point
+                    ORDER BY shortage DESC, p.id
+                    """
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                title = "Products Below Reorder Point"
+            elif "low stock" in lowered or "reorder next" in lowered or "stock risk" in lowered:
+                cursor.execute(
+                    """
+                    SELECT p.id AS product_id, p.name, s.qty_on_hand, s.reorder_point,
+                           MAX(COALESCE(sp.default_cost, 0)) AS estimated_unit_cost
+                    FROM stock s
+                    JOIN products p ON p.id = s.product_id
+                    LEFT JOIN supplier_products sp ON sp.product_id = p.id
+                    GROUP BY p.id, p.name, s.qty_on_hand, s.reorder_point
+                    ORDER BY (s.qty_on_hand - s.reorder_point) ASC, p.id
+                    """
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                title = "Stock Risk"
+            elif "supplier" in lowered:
                 cursor.execute(
                     """
                     SELECT s.id, s.name, s.email, sp.product_id, sp.lead_time_days, sp.default_cost
@@ -91,7 +118,14 @@ class InventoryTools:
                 )
                 rows = [dict(row) for row in cursor.fetchall()]
                 title = "Stock"
-        result = {"message": f"{title}\n\n{format_rows(rows)}", "rows": rows}
+        if title == "Products Below Reorder Point":
+            if rows:
+                message_text = f"{title}\n\n{format_rows(rows)}"
+            else:
+                message_text = "No products are currently below their reorder point."
+        else:
+            message_text = f"{title}\n\n{format_rows(rows)}"
+        result = {"message": message_text, "rows": rows}
         return self._log("inventory_query_tool", {"message": message}, result)
 
     def adjust_stock_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +272,15 @@ class InventoryTools:
         if "forecast" in lowered and looks_like_json_payload(message):
             payload = extract_json_payload(message)
             return self.forecast_tool(int(payload["product_id"]))
+        if (
+            "below their reorder point" in lowered
+            or "below reorder point" in lowered
+            or "which products are below" in lowered
+            or "low stock" in lowered
+            or "reorder next" in lowered
+            or "stock risk" in lowered
+        ):
+            return self.inventory_query_tool(message)
         planned = self._llm_plan(message)
         if planned:
             planned_result = self._dispatch_planned_action(planned, message, requested_by)

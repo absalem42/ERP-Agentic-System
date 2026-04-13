@@ -14,6 +14,8 @@ class FinanceAgent:
         return {
             "output": result["message"],
             "approval_required": result.get("approval_required"),
+            "rows": result.get("rows"),
+            "chart_spec": result.get("chart_spec"),
         }
 
 

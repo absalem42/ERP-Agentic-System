@@ -98,6 +98,12 @@ async def saved_reports():
     return {"saved_reports": get_direct_service().list_saved_reports()}
 
 
+@app.post("/saved-reports/{report_title}/run", response_model=ChatResponse)
+async def run_saved_report(report_title: str, user_id: int | str = 1, session_id: str | None = None):
+    result = get_direct_service().run_saved_report(report_title, user_id=user_id, session_id=session_id)
+    return ChatResponse(**result)
+
+
 if __name__ == "__main__":
     import uvicorn
 

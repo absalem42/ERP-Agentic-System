@@ -331,7 +331,7 @@ def test_finance_agent_approval_executes_for_llm_invoice_without_issue_date(runt
     conn.close()
 
 
-def test_finance_agent_rejects_llm_invoice_with_unknown_customer_reference(runtime_paths, monkeypatch):
+def test_finance_agent_uses_llm_for_vendor_bill_creation(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
     import backend.tools.finance_tools as finance_tools
 
@@ -344,12 +344,13 @@ def test_finance_agent_rejects_llm_invoice_with_unknown_customer_reference(runti
             [
                 json.dumps(
                     {
-                        "action": "post_invoice",
+                        "action": "post_vendor_bill",
                         "payload": {
-                            "customer_id": "new_vendor",
+                            "vendor_id": 1,
+                            "due_date": "2025-03-20",
                             "lines": [
                                 {
-                                    "description": "Goods/Services",
+                                    "description": "Factory supplies",
                                     "quantity": 1,
                                     "unit_price": 15000.0,
                                 }
@@ -367,15 +368,23 @@ def test_finance_agent_rejects_llm_invoice_with_unknown_customer_reference(runti
         "Post an invoice for a new vendor for 15000 AED",
         "finance",
         user_id=1,
-        session_id="fin-invalid-customer-1",
+        session_id="fin-vendor-bill-1",
     )
 
-    assert "customer invoices only" in result["response"].lower()
-    assert result["approval_required"] is None
-    assert service.list_approvals() == []
+    assert "approval" in result["response"].lower()
+    assert result["approval_required"] is not None
+    approval = service.approve_approval(result["approval_required"]["id"], decided_by="tester")
+    assert approval is not None
+    assert approval["status"] == "approved"
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM vendor_bills")
+    assert cursor.fetchone()[0] == 1
+    conn.close()
 
 
-def test_finance_agent_approved_invalid_customer_payload_returns_safe_error(runtime_paths, monkeypatch):
+def test_finance_agent_approved_invalid_vendor_payload_creates_vendor_and_posts_bill(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
@@ -383,9 +392,9 @@ def test_finance_agent_approved_invalid_customer_payload_returns_safe_error(runt
     approval = service.state_store.create_approval(
         "finance",
         {
-            "action": "post_invoice",
+            "action": "post_vendor_bill",
             "payload": {
-                "customer_id": "new_vendor",
+                "vendor_id": "unknown_vendor",
                 "lines": [{"description": "Goods/Services", "quantity": 1, "unit_price": 15000.0}],
             },
         },
@@ -396,12 +405,14 @@ def test_finance_agent_approved_invalid_customer_payload_returns_safe_error(runt
 
     assert approved is not None
     assert approved["status"] == "approved"
-    assert "unknown customer" in approved["execution_result"]["message"].lower()
+    assert "vendor bill posted" in approved["execution_result"]["message"].lower()
 
     conn = sqlite3.connect(runtime_db)
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM invoices")
-    assert cursor.fetchone()[0] == 0
+    cursor.execute("SELECT COUNT(*) FROM vendor_bills")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT COUNT(*) FROM vendors WHERE lower(name) = 'unknown vendor'")
+    assert cursor.fetchone()[0] == 1
     conn.close()
 
 
@@ -435,6 +446,26 @@ def test_inventory_agent_updates_stock_creates_po_and_receives_items(runtime_pat
     cursor.execute("SELECT status FROM purchase_orders WHERE id = 1")
     assert cursor.fetchone()[0] == "received"
     conn.close()
+
+
+def test_inventory_agent_lists_products_below_reorder_point(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Which products are below their reorder point?",
+        "inventory",
+        user_id=1,
+        session_id="inv-rop-1",
+    )
+
+    assert "reorder point" in result["response"].lower()
+    assert result["rows"]
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["qty_on_hand"] < result["rows"][0]["reorder_point"]
 
 
 def test_inventory_agent_uses_llm_for_natural_language_purchase_order(runtime_paths, monkeypatch):
@@ -577,7 +608,7 @@ def test_analytics_agent_normalizes_fenced_llm_sql_before_validation(runtime_pat
     assert result["tool_calls"][0]["output_json"]["sql"].startswith("SELECT status")
 
 
-def test_finance_agent_rejects_unsupported_vendor_invoice_prompt_without_llm(runtime_paths, monkeypatch):
+def test_finance_agent_supports_vendor_invoice_prompt_without_llm(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
@@ -588,12 +619,47 @@ def test_finance_agent_rejects_unsupported_vendor_invoice_prompt_without_llm(run
         "Post an invoice for a new vendor for 15000 AED",
         "finance",
         user_id=1,
-        session_id="fin-unsupported-vendor-1",
+        session_id="fin-vendor-no-llm-1",
     )
 
-    assert "current finance workflow supports customer invoices" in result["response"].lower()
-    assert "existing customer_id" in result["response"].lower()
-    assert result["approval_required"] is None
+    assert "vendor" in result["response"].lower()
+    assert result["approval_required"] is not None
+
+
+def test_finance_agent_returns_trial_balance_summary(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    invoice_payload = {
+        "customer_id": 1,
+        "order_id": 1,
+        "issue_date": "2025-03-05",
+        "due_date": "2025-03-20",
+        "lines": [{"description": "Widget Pro", "quantity": 2, "unit_price": 100.0}],
+    }
+    service.chat(f"post invoice {json.dumps(invoice_payload)}", "finance", user_id=1, session_id="fin-trial-1")
+    result = service.chat("Show me the trial balance summarizing account balances", "finance", user_id=1, session_id="fin-trial-1")
+
+    assert "trial balance" in result["response"].lower()
+    assert result["rows"]
+    assert set(result["rows"][0]) >= {"account", "total_debit", "total_credit"}
+
+
+def test_analytics_agent_runs_existing_saved_report_from_seed_data(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    report_result = service.chat("run report Products Below ROP", "analytics", user_id=1, session_id="ana-seeded-report-1")
+
+    assert "products below rop" in report_result["response"].lower()
+    assert report_result["rows"]
+    assert report_result["chart_spec"] is not None
 
 
 def test_api_smoke_endpoints_expose_agents_approvals_and_audit(runtime_paths, monkeypatch):

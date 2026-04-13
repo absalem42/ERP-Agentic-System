@@ -16,9 +16,9 @@ Helios Dynamics ERP is a local-first, agent-driven ERP prototype built around Fa
 - `sales`
   - customers, leads, orders, tickets, lead scoring, and customer entity memory
 - `finance`
-  - invoice posting, payment allocation, journal posting, policy lookup, and anomaly-aware approvals
+  - customer invoice posting, vendor/AP bill posting, payment allocation, journal posting, trial balance reads, policy lookup, and anomaly-aware approvals
 - `inventory`
-  - stock queries, stock movements, purchase orders, receipts, and simple demand forecasting
+  - stock queries, reorder-threshold checks, stock movements, purchase orders, receipts, and simple demand forecasting
 - `analytics`
   - read-only text-to-SQL, glossary/document context, saved reports, and chart specification output
 
@@ -71,6 +71,7 @@ The UI exposes:
 - audit trail
 - saved reports
 - health
+- release/provider marker for deploy verification
 
 Verified demo prompts shown in the UI:
 - router
@@ -83,6 +84,7 @@ Verified demo prompts shown in the UI:
   - `Reorder 20 units of product 2 from the best supplier`
 - analytics
   - `What are the top 5 products by revenue and why?`
+  - `Run report Products Below ROP`
 
 ## Local Run
 
@@ -135,11 +137,13 @@ Current verification target covers:
 - router persistence and audit logs
 - approval gating
 - sales writes and memory
-- finance posting and balancing
-- inventory procurement flows
+- finance posting, vendor/AP flows, and balancing
+- inventory procurement and reorder-threshold flows
 - analytics read-only enforcement and saved reports
 - API smoke endpoints
 - Streamlit hosted env bootstrap
+
+Additional traceability notes live in `erp_system/docs/requirements_traceability.md`.
 
 ## Presentation Notes
 
@@ -147,4 +151,4 @@ Current verification target covers:
 - Time-relative analytics questions use the real current calendar window first.
 - If the sample database has no rows for the requested current period, the app explains that directly and reports the latest available sample period instead of silently widening the scope to all history.
 - The current finance schema supports customer billing workflows through `invoices.customer_id`.
-- Vendor/AP invoice prompts are rejected safely with a user-facing explanation because that entity model is not part of the current sample schema.
+- Vendor/AP workflows are supported through additive runtime schema tables (`vendors`, `vendor_bills`, related payment/allocation tables) without replacing the customer billing model.

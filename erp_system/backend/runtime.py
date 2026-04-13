@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from functools import lru_cache
 from pathlib import Path
 
+from backend.db import get_db
 from backend.agents.AnalyticsAgent import create_analytics_agent
 from backend.agents.FinanceAgent import create_finance_agent
 from backend.agents.InventoryAgent import create_inventory_agent
 from backend.agents.SalesAgent import create_sales_agent_with_chat
 from backend.agents.simple_router_agent import create_simple_router_agent
 from backend.config.llm import get_provider_mode
-from backend.db import get_db
 from backend.memory.base_memory import AnalyticsReportMemory, RouterGlobalState, SalesEntityMemory
 from backend.mcp.mcp_adapter import mcp_registry
 from backend.mcp.tool_registry import ToolRegistry
@@ -22,6 +23,79 @@ from backend.mcp.tool_registry import ToolRegistry
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SAMPLE_DB = PROJECT_ROOT / "databases" / "erp_sample.db"
 DEFAULT_RUNTIME_DB = Path(tempfile.gettempdir()) / "erp_system_demo" / "erp_runtime.db"
+
+
+def ensure_runtime_schema(db_path: Path | str) -> None:
+    with get_db(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS vendors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS vendor_bills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vendor_id INTEGER NOT NULL,
+                bill_number TEXT,
+                issue_date DATE,
+                due_date DATE,
+                total_amount REAL,
+                status TEXT DEFAULT 'unpaid',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS vendor_bill_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vendor_bill_id INTEGER NOT NULL,
+                description TEXT,
+                quantity INTEGER,
+                unit_price REAL,
+                FOREIGN KEY (vendor_bill_id) REFERENCES vendor_bills(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS vendor_bill_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vendor_id INTEGER,
+                amount REAL,
+                method TEXT,
+                paid_at DATETIME,
+                FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS vendor_bill_allocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_id INTEGER,
+                vendor_bill_id INTEGER,
+                amount REAL,
+                FOREIGN KEY (payment_id) REFERENCES vendor_bill_payments(id),
+                FOREIGN KEY (vendor_bill_id) REFERENCES vendor_bills(id)
+            );
+            """
+        )
+        conn.commit()
+
+
+def resolve_app_version() -> str:
+    env_version = os.getenv("ERP_APP_VERSION") or os.getenv("GIT_COMMIT")
+    if env_version:
+        return env_version[:12]
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=PROJECT_ROOT,
+                text=True,
+            )
+            .strip()
+        )
+    except Exception:
+        return "dev"
 
 
 def prepare_runtime_db(
@@ -35,6 +109,7 @@ def prepare_runtime_db(
     if not runtime_db_path.exists():
         shutil.copy2(sample_db_path, runtime_db_path)
 
+    ensure_runtime_schema(runtime_db_path)
     os.environ["DB_PATH"] = str(runtime_db_path)
     return runtime_db_path
 
@@ -96,6 +171,7 @@ class DirectERPService:
             "status": "healthy",
             "database": "connected",
             "database_path": str(self.runtime_db),
+            "app_version": resolve_app_version(),
             "customer_count": customer_count,
             "pending_approvals": pending_approvals,
             "provider_mode": get_provider_mode(),
@@ -149,6 +225,15 @@ class DirectERPService:
 
     def list_saved_reports(self) -> list[dict]:
         return self.report_memory.list_reports()
+
+    def run_saved_report(
+        self,
+        title: str,
+        *,
+        user_id: int | str = 1,
+        session_id: str | None = None,
+    ) -> dict:
+        return self.chat(f"run report {title}", "analytics", user_id=user_id, session_id=session_id)
 
     def chat(
         self,

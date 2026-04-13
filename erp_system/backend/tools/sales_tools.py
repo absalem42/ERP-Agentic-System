@@ -47,6 +47,14 @@ class SalesTools:
             read_only=False,
         )
         self.registry.register_tool(
+            name="update_lead_tool",
+            handler=self.update_lead_tool,
+            description="Update a lead status",
+            input_schema={"lead_id": "int", "status": "str"},
+            module="sales",
+            read_only=False,
+        )
+        self.registry.register_tool(
             name="create_ticket_tool",
             handler=self.create_ticket_tool,
             description="Create a support ticket",
@@ -232,6 +240,17 @@ class SalesTools:
         result = {"message": f"Ticket created with id {ticket_id}.", "ticket_id": ticket_id}
         return self._log("create_ticket_tool", payload, result)
 
+    def update_lead_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE leads SET status = ? WHERE id = ?", (payload["status"], payload["lead_id"]))
+            if cursor.rowcount == 0:
+                result = {"message": f"Lead {payload['lead_id']} not found."}
+                return self._log("update_lead_tool", payload, result)
+            conn.commit()
+        result = {"message": f"Lead {payload['lead_id']} updated to status {payload['status']}."}
+        return self._log("update_lead_tool", payload, result)
+
     def lead_score_tool(self, lead_id: int | None = None) -> dict[str, Any]:
         with get_db(self.db_path) as conn:
             cursor = conn.cursor()
@@ -295,6 +314,8 @@ class SalesTools:
             return self.create_lead_tool(extract_json_payload(message))
         if lowered.startswith("create order") and looks_like_json_payload(message):
             return self.create_order_tool(extract_json_payload(message))
+        if lowered.startswith("update lead") and looks_like_json_payload(message):
+            return self.update_lead_tool(extract_json_payload(message))
         if lowered.startswith("create ticket") and looks_like_json_payload(message):
             return self.create_ticket_tool(extract_json_payload(message))
         planned = self._llm_plan(message)
@@ -304,8 +325,15 @@ class SalesTools:
                 return planned_result
         if "score leads" in lowered or "lead score" in lowered:
             return self.lead_score_tool()
-        if "playbook" in lowered or "sales docs" in lowered or "crm" in lowered:
-            return self.sales_rag_tool(message)
+        if any(keyword in lowered for keyword in ["playbook", "sales docs", "crm", "manual", "history", "follow-up"]):
+            context = self.sales_rag_tool(message)
+            memory_bits: list[str] = []
+            for customer_id in (1, 2):
+                customer_memory = self.entity_memory.get_customer_info(customer_id)
+                if customer_memory:
+                    memory_bits.append(f"customer {customer_id}: {customer_memory}")
+            memory_text = f"\n\nEntity memory: {'; '.join(memory_bits)}" if memory_bits else ""
+            return {"message": f"{context['message']}{memory_text}", "rows": context.get("documents", [])}
         return self.sales_query_tool(message)
 
     def _llm_plan(self, message: str) -> dict[str, Any] | None:
@@ -318,6 +346,7 @@ class SalesTools:
             "Allowed actions:\n"
             "- create_lead: payload needs customer_name, contact_email, message\n"
             "- create_order: payload needs customer_id, status, items[{product_id, quantity, price?}]\n"
+            "- update_lead: payload needs lead_id, status\n"
             "- create_ticket: payload needs customer_id, subject, body, status?\n"
             "- lead_score: payload may be empty\n"
             "- sales_rag: payload needs query\n"
@@ -339,6 +368,8 @@ class SalesTools:
             return self.create_lead_tool(payload)
         if action == "create_order" and {"customer_id", "items"} <= set(payload):
             return self.create_order_tool(payload)
+        if action == "update_lead" and {"lead_id", "status"} <= set(payload):
+            return self.update_lead_tool(payload)
         if action == "create_ticket" and {"customer_id", "subject", "body"} <= set(payload):
             return self.create_ticket_tool(payload)
         if action == "lead_score":
