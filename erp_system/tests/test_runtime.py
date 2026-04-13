@@ -330,6 +330,80 @@ def test_finance_agent_approval_executes_for_llm_invoice_without_issue_date(runt
     conn.close()
 
 
+def test_finance_agent_rejects_llm_invoice_with_unknown_customer_reference(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+    import backend.tools.finance_tools as finance_tools
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setattr(finance_tools, "has_llm_credentials", lambda: True, raising=False)
+    monkeypatch.setattr(
+        finance_tools,
+        "get_llm",
+        lambda: FakeLLM(
+            [
+                json.dumps(
+                    {
+                        "action": "post_invoice",
+                        "payload": {
+                            "customer_id": "new_vendor",
+                            "lines": [
+                                {
+                                    "description": "Goods/Services",
+                                    "quantity": 1,
+                                    "unit_price": 15000.0,
+                                }
+                            ],
+                        },
+                    }
+                )
+            ]
+        ),
+        raising=False,
+    )
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Post an invoice for a new vendor for 15000 AED",
+        "finance",
+        user_id=1,
+        session_id="fin-invalid-customer-1",
+    )
+
+    assert "unknown customer" in result["response"].lower()
+    assert result["approval_required"] is None
+    assert service.list_approvals() == []
+
+
+def test_finance_agent_approved_invalid_customer_payload_returns_safe_error(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    approval = service.state_store.create_approval(
+        "finance",
+        {
+            "action": "post_invoice",
+            "payload": {
+                "customer_id": "new_vendor",
+                "lines": [{"description": "Goods/Services", "quantity": 1, "unit_price": 15000.0}],
+            },
+        },
+        requested_by="tester",
+    )
+
+    approved = service.approve_approval(approval["id"], decided_by="tester")
+
+    assert approved is not None
+    assert approved["status"] == "approved"
+    assert "unknown customer" in approved["execution_result"]["message"].lower()
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM invoices")
+    assert cursor.fetchone()[0] == 0
+    conn.close()
+
+
 def test_inventory_agent_updates_stock_creates_po_and_receives_items(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 

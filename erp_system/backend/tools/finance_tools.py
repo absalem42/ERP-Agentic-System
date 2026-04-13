@@ -69,6 +69,10 @@ class FinanceTools:
 
     def post_invoice_tool(self, payload: dict[str, Any], requested_by: str = "system", approved: bool = False) -> dict[str, Any]:
         payload = self._normalize_invoice_payload(payload)
+        reference_error = self._validate_invoice_references(payload)
+        if reference_error:
+            result = {"message": reference_error}
+            return self._log("post_invoice_tool", payload, result)
         anomaly = self.anomaly_detector_tool(payload)
         total_amount = anomaly["total_amount"]
         if anomaly["is_risky"] and not approved:
@@ -271,6 +275,15 @@ class FinanceTools:
 
     def _normalize_invoice_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
+        raw_customer_id = normalized.get("customer_id")
+        normalized["customer_id"] = self._coerce_int(raw_customer_id)
+        if raw_customer_id != normalized["customer_id"]:
+            normalized["_raw_customer_id"] = raw_customer_id
+        if "order_id" in normalized:
+            raw_order_id = normalized.get("order_id")
+            normalized["order_id"] = self._coerce_int(raw_order_id)
+            if raw_order_id != normalized["order_id"]:
+                normalized["_raw_order_id"] = raw_order_id
         issue_date = normalized.get("issue_date") or normalized.get("entry_date")
         if not issue_date:
             due_date = normalized.get("due_date")
@@ -280,6 +293,44 @@ class FinanceTools:
                 issue_date = datetime.utcnow().strftime("%Y-%m-%d")
         normalized["issue_date"] = issue_date[:10] if isinstance(issue_date, str) else issue_date
         return normalized
+
+    def _validate_invoice_references(self, payload: dict[str, Any]) -> str | None:
+        customer_id = payload.get("customer_id")
+        if customer_id is None:
+            raw_customer_id = payload.get("_raw_customer_id")
+            if raw_customer_id is not None:
+                return f"Unknown customer reference: {raw_customer_id}. Provide an existing customer_id."
+            return "Invoice payload must include a valid existing customer_id."
+
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM customers WHERE id = ?", (customer_id,))
+            if cursor.fetchone() is None:
+                return f"Unknown customer reference: {payload.get('customer_id')}. Provide an existing customer_id."
+
+            order_id = payload.get("order_id")
+            if order_id is not None:
+                cursor.execute("SELECT 1 FROM orders WHERE id = ?", (order_id,))
+                if cursor.fetchone() is None:
+                    raw_order_id = payload.get("_raw_order_id", payload.get("order_id"))
+                    return f"Unknown order reference: {raw_order_id}. Provide an existing order_id."
+
+        return None
+
+    def _coerce_int(self, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.isdigit():
+                return int(stripped)
+        return None
 
     def _llm_plan(self, message: str) -> dict[str, Any] | None:
         if not has_llm_credentials():
