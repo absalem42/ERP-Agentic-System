@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from frontend.runtime_env import bootstrap_runtime_environment
-from frontend.ui_helpers import build_panel_visibility, build_status_tiles
+from frontend.ui_helpers import assistant_title, build_panel_visibility, build_status_tiles
 
 bootstrap_runtime_environment(getattr(st, "secrets", None))
 
@@ -189,6 +189,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "selected_agent" not in st.session_state:
     st.session_state.selected_agent = "Router Agent"
+if "last_agent_used" not in st.session_state:
+    st.session_state.last_agent_used = "router"
 if "session_id" not in st.session_state:
     st.session_state.session_id = "streamlit-main"
 if "user_id" not in st.session_state:
@@ -221,6 +223,7 @@ with st.sidebar:
     if agent_choice != st.session_state.selected_agent:
         st.session_state.selected_agent = agent_choice
         st.session_state.messages = []
+        st.session_state.last_agent_used = agent_mapping[agent_choice]
 
     if panel_visibility["show_identity_controls"]:
         st.session_state.user_id = int(
@@ -230,6 +233,7 @@ with st.sidebar:
 
     if st.button("Clear Chat", width="stretch"):
         st.session_state.messages = []
+        st.session_state.last_agent_used = agent_mapping[st.session_state.selected_agent]
         st.rerun()
 
 st.subheader(agent_info[st.session_state.selected_agent])
@@ -242,8 +246,9 @@ for message in st.session_state.messages:
             unsafe_allow_html=True,
         )
     else:
+        rendered_agent = message.get("agent_label") or assistant_title(message.get("agent_used"))
         st.markdown(
-            f'<div class="assistant-message">🤖 {st.session_state.selected_agent}: {message["content"]}</div>',
+            f'<div class="assistant-message">🤖 {rendered_agent}: {message["content"]}</div>',
             unsafe_allow_html=True,
         )
         render_chart(message.get("chart_spec"))
@@ -272,10 +277,14 @@ if st.button("Send") and user_input:
             int(st.session_state.user_id),
             st.session_state.session_id,
         )
+    agent_used = str(result.get("agent_used", "router")).strip().lower() or "router"
+    st.session_state.last_agent_used = agent_used
     st.session_state.messages.append(
         {
             "role": "assistant",
             "content": result.get("response", "No response received"),
+            "agent_used": agent_used,
+            "agent_label": assistant_title(agent_used),
             "chart_spec": result.get("chart_spec"),
             "rows": result.get("rows"),
             "tool_calls": result.get("tool_calls", []),
@@ -287,11 +296,11 @@ if st.button("Send") and user_input:
 status_tiles = build_status_tiles(
     health_data,
     sum(1 for approval in approvals if approval.get("status") == "pending"),
-    current_agent_label=agent_mapping[st.session_state.selected_agent],
+    current_agent_label=str(st.session_state.last_agent_used),
 )
 status_columns = st.columns(len(status_tiles))
 router_status = health_data.get("agents", {}).get("router", "unavailable")
-selected_backend_agent = agent_mapping[st.session_state.selected_agent]
+selected_backend_agent = str(st.session_state.last_agent_used)
 selected_status = health_data.get("agents", {}).get(selected_backend_agent, "unavailable")
 provider_mode = str(health_data.get("provider_mode", "fallback")).lower()
 
@@ -359,6 +368,6 @@ if panel_visibility["show_health"]:
 if panel_visibility["show_footer_runtime"]:
     st.markdown("---")
     st.info(
-        f"💬 Chat with {st.session_state.selected_agent} • {len(st.session_state.messages)} messages • "
+        f"💬 Chat with {assistant_title(str(st.session_state.last_agent_used))} • {len(st.session_state.messages)} messages • "
         f"{'Direct runtime' if DIRECT_MODE else f'API: {API_URL}'}"
     )
