@@ -1,74 +1,20 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Dict, List, Optional
-import sys
-from pathlib import Path
-import json
-import asyncio
 
-# Add current directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+from backend.runtime import get_direct_service
 
-# Import agents with error handling
-try:
-    # Import router agent directly for better error handling
-    from agents.simple_router_agent import create_simple_router_agent
-    router_executor = create_simple_router_agent()
-    ROUTER_AVAILABLE = True
-    print("✅ Router agent loaded successfully")
-except Exception as e:
-    print(f"Warning: Router agent failed to initialize: {e}")
-    # Try to import router anyway for error handling
-    try:
-        from agents.simple_router_agent import create_simple_router_agent
-        router_executor = None  # We'll create it on demand
-        ROUTER_AVAILABLE = True
-        print("🔄 Router agent available but not initialized (will use on-demand creation)")
-    except ImportError:
-        print(f"Router agent completely unavailable: {e}")
-        router_executor = None
-        ROUTER_AVAILABLE = False
-
-try:
-    from agents.SalesAgent import create_sales_agent_with_chat
-    sales_agent = create_sales_agent_with_chat()
-    SALES_AGENT_AVAILABLE = True
-    print("✅ New Sales agent loaded successfully")
-except ImportError as e:
-    print(f"Warning: New Sales agent not available, trying fallback: {e}")
-    try:
-        from agents.sales_agent_simple import SimpleSalesAgent
-        sales_agent = SimpleSalesAgent()
-        SALES_AGENT_AVAILABLE = True
-        print("✅ Fallback Sales agent loaded successfully")
-    except ImportError as e2:
-        print(f"Warning: Sales agent not available: {e2}")
-        sales_agent = None
-        SALES_AGENT_AVAILABLE = False
-
-try:
-    from agents.AnalyticsAgent import create_analytics_agent
-    analytics_agent = create_analytics_agent()
-    ANALYTICS_AGENT_AVAILABLE = True
-    print("✅ Analytics agent loaded successfully")
-except Exception as e:
-    print(f"Warning: Analytics agent not available: {e}")
-    analytics_agent = None
-    ANALYTICS_AGENT_AVAILABLE = False
-
-from db import get_db
-from tools.sales_tools import SalesTools
 
 app = FastAPI(
     title="Helios Dynamics ERP API",
     description="Agent-driven ERP system API",
-    version="1.0.0"
+    version="2.0.0",
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -77,309 +23,82 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
-frontend_path = Path(__file__).parent.parent / "frontend"
-if (frontend_path.exists()):
-    app.mount("/static", StaticFiles(directory=str(frontend_path / "static")), name="static")
 
-# Pydantic models
 class ChatRequest(BaseModel):
     message: str
-    agent: Optional[str] = "router"
+    agent: str = "router"
+    user_id: int | str = 1
+    session_id: str | None = None
+
 
 class ChatResponse(BaseModel):
     response: str
     agent_used: str
+    tool_calls: list[dict[str, Any]]
+    approval_required: dict[str, Any] | None = None
+    chart_spec: dict[str, Any] | None = None
+    rows: list[dict[str, Any]] | None = None
     execution_time: float
 
-class QueryRequest(BaseModel):
-    query: str
-    table: Optional[str] = None
-
-# Global instances
-sales_tools = SalesTools()
 
 @app.get("/")
 async def root():
-    """Serve the main application"""
-    if frontend_path.exists() and (frontend_path / "index.html").exists():
-        return FileResponse(str(frontend_path / "index.html"))
-    else:
-        return {
-            "message": "Helios Dynamics ERP API",
-            "version": "1.0.0",
-            "status": "active",
-            "frontend": "not_found",
-            "note": "Frontend files not found. API endpoints available at /docs"
-        }
+    return {"message": "Helios Dynamics ERP API", "version": "2.0.0", "docs": "/docs"}
 
-@app.get("/api")
-async def api_root():
-    return {
-        "message": "Helios Dynamics ERP API",
-        "version": "1.0.0",
-        "status": "active",
-        "agents": {
-            "router": "available" if ROUTER_AVAILABLE else "unavailable",
-            "sales": "available" if SALES_AGENT_AVAILABLE else "unavailable",
-            "analytics": "available" if ANALYTICS_AGENT_AVAILABLE else "unavailable"
-        },
-        "docs": "/docs"
-    }
 
 @app.get("/health")
-async def health_check():
-    try:
-        # Test database connection
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM customers")
-            customer_count = cursor.fetchone()[0]
-        
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "customer_count": customer_count,
-            "agents": {
-                "router": "available" if ROUTER_AVAILABLE else "unavailable",
-                "sales": "available" if SALES_AGENT_AVAILABLE else "unavailable",
-                "analytics": "available" if ANALYTICS_AGENT_AVAILABLE else "unavailable"
-            },
-            "frontend": "available" if frontend_path.exists() else "unavailable"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+async def health():
+    return get_direct_service().get_health()
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_with_agent(request: ChatRequest):
-    """Chat with the ERP agents"""
-    import time
-    start_time = time.time()
-    
-    try:
-        print(f"Received chat request: agent={request.agent}, message='{request.message}'")
-        
-        # Handle different agent types
-        if request.agent == "sales" and SALES_AGENT_AVAILABLE:
-            print("Using Sales Agent directly")
-            result = sales_agent.invoke({"input": request.message})
-            response = result['output']
-            agent_used = "sales"
-            
-        elif request.agent == "analytics":
-            if ANALYTICS_AGENT_AVAILABLE:
-                print("Using Analytics Agent")
-                result = analytics_agent.invoke({"input": request.message})
-                response = result.get('output', str(result))
-                agent_used = "analytics"
-            else:
-                print("Analytics Agent not available, falling back to Sales Agent")
-                if SALES_AGENT_AVAILABLE:
-                    result = sales_agent.invoke({"input": request.message})
-                    response = result['output']
-                    agent_used = "sales"
-                else:
-                    response = "Analytics Agent is currently unavailable due to missing dependencies. Please check system configuration."
-                    agent_used = "analytics"
-            
-        elif ROUTER_AVAILABLE:
-            print("Using Router Agent")
-            # Create router on demand if not already created
-            if router_executor is None:
-                try:
-                    from agents.simple_router_agent import create_simple_router_agent
-                    router_executor_temp = create_simple_router_agent()
-                    result = router_executor_temp.invoke({"input": request.message})
-                except Exception as e:
-                    print(f"Router creation failed, falling back to sales: {e}")
-                    if SALES_AGENT_AVAILABLE:
-                        result = sales_agent.invoke({"input": request.message})
-                        response = result['output']
-                        agent_used = "sales"
-                    else:
-                        response = f"Router agent error: {str(e)}"
-                        agent_used = "error"
-            else:
-                result = router_executor.invoke({"input": request.message})
-            
-            if 'result' in locals() and result:
-                response = result['output']
-                agent_used = "router"
-            
-        elif SALES_AGENT_AVAILABLE:
-            print("Fallback to Sales Agent")
-            result = sales_agent.invoke({"input": request.message})
-            response = result['output']
-            agent_used = "sales"
-            
-        else:
-            response = "Sorry, no agents are currently available. Please check the system configuration."
-            agent_used = "none"
-        
-        execution_time = time.time() - start_time
-        print(f"Response generated in {execution_time:.2f}s by {agent_used} agent")
-        
-        return ChatResponse(
-            response=response,
-            agent_used=agent_used,
-            execution_time=execution_time
-        )
-    
-    except Exception as e:
-        print(f"Chat error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 @app.get("/agents")
 async def list_agents():
-    """List available agents and their status"""
-    agents = []
-    
-    if SALES_AGENT_AVAILABLE:
-        agents.append({
-            "name": "sales",
-            "description": "Sales and CRM management agent",
-            "status": "active",
-            "capabilities": ["customer_management", "lead_scoring", "order_tracking"]
-        })
-    
-    if ANALYTICS_AGENT_AVAILABLE:
-        agents.append({
-            "name": "analytics",
-            "description": "Analytics and reporting agent with SQL query generation",
-            "status": "active",
-            "capabilities": ["data_analysis", "sql_queries", "visualization", "reporting"]
-        })
-    
-    if ROUTER_AVAILABLE:
-        agents.append({
-            "name": "router",
-            "description": "Smart router that routes requests to appropriate agents",
-            "status": "active",
-            "capabilities": ["routing", "logging", "approvals"]
-        })
-    
-    return {"agents": agents}
+    return {"agents": get_direct_service().list_agents()}
 
-@app.get("/customers")
-async def get_customers(limit: int = 10):
-    """Get customer list"""
-    try:
-        if SALES_AGENT_AVAILABLE:
-            result = sales_agent.invoke({"input": "show customers"})
-            return {"data": result['output'], "limit": limit}
-        else:
-            # Direct database query fallback
-            customers = sales_tools.sales_sql_read(f"SELECT * FROM customers LIMIT {limit}")
-            return {"data": str(customers), "limit": limit}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting customers: {str(e)}")
 
-@app.get("/customers/summary")
-async def get_customer_summary():
-    """Get customer summary statistics"""
-    try:
-        if SALES_AGENT_AVAILABLE:
-            result = sales_agent.invoke({"input": "customer summary"})
-            return {"summary": result['output']}
-        else:
-            # Direct summary
-            summary = sales_tools._customer_summary()
-            return {"summary": summary}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting customer summary: {str(e)}")
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    result = get_direct_service().chat(
+        request.message,
+        request.agent,
+        user_id=request.user_id,
+        session_id=request.session_id,
+    )
+    return ChatResponse(**result)
 
-@app.get("/leads")
-async def get_leads():
-    """Get leads list"""
-    try:
-        if SALES_AGENT_AVAILABLE:
-            result = sales_agent.invoke({"input": "show leads"})
-            return {"data": result['output']}
-        else:
-            # Direct database query
-            leads = sales_tools.sales_sql_read("SELECT * FROM leads LIMIT 10")
-            return {"data": str(leads)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting leads: {str(e)}")
 
-@app.post("/leads/score")
-async def score_leads():
-    """Score all leads"""
-    try:
-        result = sales_tools.score_leads()
-        return {"result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error scoring leads: {str(e)}")
+@app.get("/approvals")
+async def list_approvals(status: str | None = None):
+    return {"approvals": get_direct_service().list_approvals(status=status)}
 
-@app.get("/orders")
-async def get_orders():
-    """Get orders list"""
-    try:
-        if SALES_AGENT_AVAILABLE:
-            result = sales_agent.invoke({"input": "show orders"})
-            return {"data": result['output']}
-        else:
-            # Direct database query
-            orders = sales_tools.sales_sql_read("SELECT * FROM orders LIMIT 10")
-            return {"data": str(orders)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting orders: {str(e)}")
 
-@app.post("/query", response_model=Dict)
-async def execute_query(request: QueryRequest):
-    """Execute SQL query"""
-    try:
-        if not request.query.strip().upper().startswith("SELECT"):
-            raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
-        
-        results = sales_tools.sales_sql_read(request.query)
-        return {"results": results, "row_count": len(results)}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+@app.post("/approvals/{approval_id}/approve")
+async def approve_approval(approval_id: int, decided_by: str = "system"):
+    approval = get_direct_service().approve_approval(approval_id, decided_by=decided_by)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return approval
 
-@app.get("/database/tables")
-async def get_database_tables():
-    """Get list of database tables"""
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-            tables = [row[0] for row in cursor.fetchall()]
-        
-        return {"tables": tables, "count": len(tables)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-@app.get("/database/stats")
-async def get_database_stats():
-    """Get database statistics"""
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            
-            stats = {}
-            tables = ["customers", "orders", "leads", "products", "invoices"]
-            
-            for table in tables:
-                try:
-                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                    count = cursor.fetchone()[0]
-                    stats[table] = count
-                except:
-                    stats[table] = 0
-        
-        return {"statistics": stats}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database stats error: {str(e)}")
+@app.post("/approvals/{approval_id}/reject")
+async def reject_approval(approval_id: int, decided_by: str = "system"):
+    approval = get_direct_service().reject_approval(approval_id, decided_by=decided_by)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return approval
+
+
+@app.get("/audit/tool-calls")
+async def audit_tool_calls(limit: int = 50):
+    return {"tool_calls": get_direct_service().list_tool_calls(limit=limit)}
+
+
+@app.get("/saved-reports")
+async def saved_reports():
+    return {"saved_reports": get_direct_service().list_saved_reports()}
+
 
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 Starting Helios Dynamics ERP API Server...")
-    print("📊 Frontend available at: http://localhost:8000")
-    print("📚 API docs at: http://localhost:8000/docs")
-    print(f"🤖 Sales Agent: {'✅ Available' if SALES_AGENT_AVAILABLE else '❌ Unavailable'}")
-    print(f"🔀 Router Agent: {'✅ Available' if ROUTER_AVAILABLE else '❌ Unavailable'}")
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

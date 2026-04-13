@@ -1,42 +1,37 @@
-import types
+def test_resolve_azure_openai_settings_supports_full_target_uri(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "secret-key")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_TARGET_URI",
+        "https://ai-la.cognitiveservices.azure.com/openai/deployments/gpt-4.1/chat/completions?api-version=2025-01-01-preview",
+    )
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
 
-from backend.config import llm
-from backend.config.llm import DEFAULT_GROQ_MODEL, get_groq_model, has_llm_credentials
+    from backend.config.llm import has_llm_credentials, resolve_azure_openai_settings
 
+    settings = resolve_azure_openai_settings()
 
-def test_groq_model_defaults(monkeypatch):
-    monkeypatch.delenv("GROQ_MODEL", raising=False)
-    assert get_groq_model() == DEFAULT_GROQ_MODEL
-
-
-def test_has_llm_credentials_uses_groq_key(monkeypatch):
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    assert has_llm_credentials() is False
-
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    assert settings["endpoint"] == "https://ai-la.cognitiveservices.azure.com"
+    assert settings["deployment"] == "gpt-4.1"
+    assert settings["api_version"] == "2025-01-01-preview"
     assert has_llm_credentials() is True
 
 
-def test_get_llm_uses_http_groq_fallback_when_langchain_package_is_unavailable(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.setenv("GROQ_MODEL", "llama-3.1-8b-instant")
-    monkeypatch.setattr(llm, "GROQ_AVAILABLE", False)
-    monkeypatch.setattr(llm, "OLLAMA_AVAILABLE", False)
+def test_resolve_azure_openai_settings_normalizes_full_endpoint_value(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "secret-key")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://ai-la.cognitiveservices.azure.com/openai/deployments/gpt-4.1/chat/completions?api-version=2025-01-01-preview",
+    )
+    monkeypatch.delenv("AZURE_OPENAI_TARGET_URI", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
 
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
+    from backend.config.llm import resolve_azure_openai_settings
 
-        def json(self):
-            return {"choices": [{"message": {"content": "groq http ok"}}]}
+    settings = resolve_azure_openai_settings()
 
-    def fake_post(*args, **kwargs):
-        return FakeResponse()
-
-    monkeypatch.setattr("requests.post", fake_post)
-
-    client = llm.get_llm()
-    response = client.invoke("ping")
-    content = response.content if hasattr(response, "content") else response
-
-    assert content == "groq http ok"
+    assert settings["endpoint"] == "https://ai-la.cognitiveservices.azure.com"
+    assert settings["deployment"] == "gpt-4.1"
+    assert settings["api_version"] == "2025-01-01-preview"

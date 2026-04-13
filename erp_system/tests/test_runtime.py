@@ -1,111 +1,23 @@
+import json
 import sqlite3
-from pathlib import Path
-
-import pytest
 
 
-def create_sample_db(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    cursor = conn.cursor()
-    cursor.executescript(
-        """
-        CREATE TABLE customers (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT,
-            created_at TEXT
-        );
+class FakeLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
 
-        CREATE TABLE orders (
-            id INTEGER PRIMARY KEY,
-            customer_id INTEGER NOT NULL,
-            total REAL NOT NULL,
-            status TEXT,
-            created_at TEXT
-        );
+    def invoke(self, prompt: str, **kwargs):
+        if not self.responses:
+            raise AssertionError(f"Unexpected LLM prompt with no stubbed response left: {prompt}")
 
-        CREATE TABLE leads (
-            id INTEGER PRIMARY KEY,
-            customer_name TEXT,
-            contact_email TEXT,
-            message TEXT,
-            score REAL,
-            status TEXT,
-            created_at TEXT
-        );
+        class Response:
+            def __init__(self, content):
+                self.content = content
 
-        CREATE TABLE products (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            price REAL NOT NULL
-        );
-
-        CREATE TABLE order_items (
-            id INTEGER PRIMARY KEY,
-            order_id INTEGER NOT NULL,
-            product_id INTEGER NOT NULL,
-            quantity INTEGER NOT NULL,
-            price REAL NOT NULL
-        );
-        """
-    )
-    cursor.executemany(
-        "INSERT INTO customers (id, name, email, created_at) VALUES (?, ?, ?, ?)",
-        [
-            (1, "Acme Corp", "contact@acme.example", "2024-01-10 10:00:00"),
-            (2, "Globex LLC", "sales@globex.example", "2024-02-15 12:30:00"),
-        ],
-    )
-    cursor.executemany(
-        "INSERT INTO orders (id, customer_id, total, status, created_at) VALUES (?, ?, ?, ?, ?)",
-        [
-            (1, 1, 948.49, "paid", "2024-04-05 14:00:00"),
-            (2, 2, 249.50, "pending", "2024-04-10 13:20:00"),
-        ],
-    )
-    cursor.executemany(
-        "INSERT INTO leads (id, customer_name, contact_email, message, score, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                1,
-                "Wayne Enterprises",
-                "bruce@wayne.example",
-                "Interested in bulk order",
-                0.9,
-                "new",
-                "2024-04-02 08:30:00",
-            ),
-        ],
-    )
-    cursor.executemany(
-        "INSERT INTO products (id, name, price) VALUES (?, ?, ?)",
-        [
-            (1, "Widget Pro", 199.99),
-            (2, "Service A", 499.00),
-        ],
-    )
-    cursor.executemany(
-        "INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES (?, ?, ?, ?, ?)",
-        [
-            (1, 1, 1, 2, 199.99),
-            (2, 1, 2, 1, 499.00),
-            (3, 2, 1, 1, 199.99),
-        ],
-    )
-    conn.commit()
-    conn.close()
+        return Response(self.responses.pop(0))
 
 
-@pytest.fixture
-def runtime_paths(tmp_path):
-    sample_db = tmp_path / "sample" / "erp_sample.db"
-    runtime_db = tmp_path / "runtime" / "erp_public_demo.db"
-    create_sample_db(sample_db)
-    return sample_db, runtime_db
-
-
-def test_prepare_runtime_db_copies_demo_database(runtime_paths, monkeypatch):
+def test_prepare_runtime_db_copies_sample_database(runtime_paths, monkeypatch):
     from backend import runtime
 
     sample_db, runtime_db = runtime_paths
@@ -116,151 +28,376 @@ def test_prepare_runtime_db_copies_demo_database(runtime_paths, monkeypatch):
     assert resolved == runtime_db
     assert runtime_db.exists()
     assert runtime_db.read_bytes() == sample_db.read_bytes()
-    assert runtime_db.as_posix() == runtime.os.environ["DB_PATH"].replace("\\", "/")
+    assert runtime.os.environ["DB_PATH"].replace("\\", "/") == runtime_db.as_posix()
 
 
-def test_direct_service_routes_customer_queries_without_api(runtime_paths, monkeypatch):
+def test_router_records_conversation_and_tool_calls_for_sales_query(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("show customers", "router")
+    result = service.chat("show customers", "router", user_id=1, session_id="session-a")
 
     assert result["agent_used"] == "sales"
     assert "Acme Corp" in result["response"]
-    assert result["execution_time"] >= 0
+    assert result["tool_calls"]
+    assert result["approval_required"] is None
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM conversations WHERE session_id = ?", ("session-a",))
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT COUNT(*) FROM messages WHERE conversation_id = 1")
+    assert cursor.fetchone()[0] == 2
+    cursor.execute("SELECT tool_name FROM tool_calls ORDER BY id DESC LIMIT 1")
+    assert cursor.fetchone()[0] == "sales_query_tool"
+    conn.close()
 
 
-def test_direct_service_analytics_fallback_supports_revenue_queries(runtime_paths, monkeypatch):
+def test_router_requires_approval_for_large_finance_invoice(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("revenue by month", "analytics")
+    payload = {
+        "customer_id": 1,
+        "order_id": 1,
+        "issue_date": "2025-03-01",
+        "due_date": "2025-03-15",
+        "lines": [{"description": "Large machinery", "quantity": 1, "unit_price": 25000.0}],
+    }
 
-    assert result["agent_used"] == "analytics"
-    assert "Revenue" in result["response"]
-    assert "2024-04" in result["response"]
+    result = service.chat(f"post invoice {json.dumps(payload)}", "router", user_id=1, session_id="session-b")
+
+    assert result["agent_used"] == "finance"
+    assert result["approval_required"] is not None
+    assert result["approval_required"]["status"] == "pending"
+    assert "approval" in result["response"].lower()
 
 
-def test_direct_service_routes_customer_count_questions_to_count_response(runtime_paths, monkeypatch):
+def test_router_uses_llm_classification_for_non_keyword_message(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
+    import backend.tools.router_tools as router_tools
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(router_tools, "has_llm_credentials", lambda: True)
+    monkeypatch.setattr(router_tools, "get_llm", lambda: FakeLLM(['{"label":"inventory"}']))
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("how many customers do we have", "router")
+    result = service.chat(
+        "Which products look close to needing replenishment soon?",
+        "router",
+        user_id=1,
+        session_id="router-llm-1",
+    )
 
-    assert result["agent_used"] == "sales"
-    assert "There are 2 customers in the database." in result["response"]
+    assert result["agent_used"] == "inventory"
 
 
-def test_direct_mode_respects_explicit_disable_flag(runtime_paths, monkeypatch):
+def test_sales_agent_can_create_lead_order_and_ticket_and_update_customer_memory(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.setenv("ERP_ENABLE_DIRECT_AI", "false")
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
 
-    assert service._load_router_agent() is None
-    assert service._load_sales_agent() is None
-    assert service._load_analytics_agent() is None
+    lead_payload = {
+        "customer_name": "New Horizon",
+        "contact_email": "sales@newhorizon.example",
+        "message": "Urgent demo request and pricing",
+    }
+    lead_result = service.chat(f"create lead {json.dumps(lead_payload)}", "sales", user_id=1, session_id="sales-1")
+    assert "lead created" in lead_result["response"].lower()
+
+    order_payload = {
+        "customer_id": 1,
+        "status": "paid",
+        "items": [{"product_id": 1, "quantity": 2}, {"product_id": 2, "quantity": 1}],
+    }
+    order_result = service.chat(f"create order {json.dumps(order_payload)}", "sales", user_id=1, session_id="sales-1")
+    assert "order created" in order_result["response"].lower()
+
+    ticket_payload = {"customer_id": 1, "subject": "Need invoice copy", "body": "Please resend invoice."}
+    ticket_result = service.chat(f"create ticket {json.dumps(ticket_payload)}", "sales", user_id=1, session_id="sales-1")
+    assert "ticket created" in ticket_result["response"].lower()
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM leads WHERE customer_name = 'New Horizon'")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT COUNT(*) FROM orders WHERE customer_id = 1")
+    assert cursor.fetchone()[0] == 2
+    cursor.execute("SELECT COUNT(*) FROM tickets WHERE subject = 'Need invoice copy'")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute(
+        "SELECT value FROM customer_kv WHERE customer_id = 1 AND key = 'last_order_date'"
+    )
+    assert cursor.fetchone()[0]
+    conn.close()
 
 
-def test_hosted_direct_mode_enables_ai_when_groq_key_is_present(monkeypatch):
-    from backend import runtime
-
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
-
-    assert runtime._hosted_direct_ai_enabled() is True
-
-
-def test_direct_service_analytics_supports_total_revenue_question(runtime_paths, monkeypatch):
+def test_sales_agent_uses_llm_for_natural_language_lead_creation(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
+    import backend.tools.sales_tools as sales_tools
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-
-    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("what is our total revenue", "analytics")
-
-    assert result["agent_used"] == "analytics"
-    assert "Total Revenue" in result["response"]
-    assert "$1197.99" in result["response"]
-
-
-def test_direct_service_analytics_supports_worst_products_question(runtime_paths, monkeypatch):
-    from backend.runtime import DirectERPService
-
-    sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-
-    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("worst 5 products by revenue", "analytics")
-
-    assert result["agent_used"] == "analytics"
-    assert "Worst Products by Revenue" in result["response"]
-    assert "Service A" in result["response"]
-
-
-def test_direct_service_analytics_handles_total_analysis_prompt(runtime_paths, monkeypatch):
-    from backend.runtime import DirectERPService
-
-    sample_db, runtime_db = runtime_paths
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-
-    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("give me total analysis", "analytics")
-
-    assert result["agent_used"] == "analytics"
-    assert "Executive Summary" in result["response"]
-    assert "Total Revenue" in result["response"]
-
-
-def test_direct_service_prefers_hosted_analytics_agent_when_available(runtime_paths, monkeypatch):
-    from backend.runtime import DirectERPService
-
-    sample_db, runtime_db = runtime_paths
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
-
-    class FakeAnalyticsAgent:
-        def invoke(self, payload):
-            return {"output": f"AI analytics answer for: {payload['input']}"}
-
+    monkeypatch.setattr(sales_tools, "has_llm_credentials", lambda: True, raising=False)
     monkeypatch.setattr(
-        DirectERPService,
-        "_build_hosted_analytics_llm_agent",
-        lambda self: FakeAnalyticsAgent(),
+        sales_tools,
+        "get_llm",
+        lambda: FakeLLM(
+            [
+                json.dumps(
+                    {
+                        "action": "create_lead",
+                        "payload": {
+                            "customer_name": "New Horizon",
+                            "contact_email": "sales@newhorizon.example",
+                            "message": "Urgent demo and pricing request",
+                        },
+                    }
+                )
+            ]
+        ),
+        raising=False,
     )
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("give me a plain english executive analysis of overall performance", "analytics")
+    result = service.chat(
+        "Please add a new lead for New Horizon. Email sales@newhorizon.example. They want an urgent demo and pricing.",
+        "sales",
+        user_id=1,
+        session_id="sales-llm-1",
+    )
 
-    assert result["agent_used"] == "analytics"
-    assert result["response"] == "AI analytics answer for: give me a plain english executive analysis of overall performance"
+    assert "lead created" in result["response"].lower()
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM leads WHERE customer_name = 'New Horizon'")
+    assert cursor.fetchone()[0] == 1
+    conn.close()
 
 
-def test_router_prefers_ai_classification_when_available(runtime_paths, monkeypatch):
+def test_finance_agent_posts_invoice_allocates_payment_and_balances_ledger(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
     sample_db, runtime_db = runtime_paths
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.delenv("ERP_ENABLE_DIRECT_AI", raising=False)
-
-    monkeypatch.setattr(DirectERPService, "_classify_route_with_llm", lambda self, message: "analytics")
-    monkeypatch.setattr(DirectERPService, "_run_analytics", lambda self, message: "AI analytics route")
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
 
     service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
-    result = service.chat("show me performance insights", "router")
+    invoice_payload = {
+        "customer_id": 1,
+        "order_id": 1,
+        "issue_date": "2025-03-05",
+        "due_date": "2025-03-20",
+        "lines": [{"description": "Widget Pro", "quantity": 2, "unit_price": 100.0}],
+    }
 
-    assert result["agent_used"] == "analytics"
-    assert result["response"] == "AI analytics route"
+    invoice_result = service.chat(f"post invoice {json.dumps(invoice_payload)}", "finance", user_id=1, session_id="fin-1")
+    assert "invoice posted" in invoice_result["response"].lower()
+
+    payment_payload = {
+        "customer_id": 1,
+        "invoice_id": 1,
+        "amount": 200.0,
+        "method": "bank_transfer",
+        "received_at": "2025-03-06 10:00:00",
+    }
+    payment_result = service.chat(f"record payment {json.dumps(payment_payload)}", "finance", user_id=1, session_id="fin-1")
+    assert "payment recorded" in payment_result["response"].lower()
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM invoices")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT COUNT(*) FROM payment_allocations")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute(
+        "SELECT ROUND(SUM(debit), 2), ROUND(SUM(credit), 2) FROM ledger_lines"
+    )
+    debit_total, credit_total = cursor.fetchone()
+    assert debit_total == credit_total == 400.0
+    conn.close()
+
+
+def test_finance_agent_rejects_unknown_account_in_manual_journal(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    journal_payload = {
+        "entry_date": "2025-03-07",
+        "lines": [
+            {"account": "Cash", "debit": 50.0, "credit": 0.0},
+            {"account": "Unknown Account", "debit": 0.0, "credit": 50.0},
+        ],
+    }
+
+    result = service.chat(f"post journal {json.dumps(journal_payload)}", "finance", user_id=1, session_id="fin-2")
+
+    assert "unknown account" in result["response"].lower()
+
+
+def test_finance_agent_executes_approved_invoice_after_approval(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    payload = {
+        "customer_id": 1,
+        "order_id": 1,
+        "issue_date": "2025-03-01",
+        "due_date": "2025-03-15",
+        "lines": [{"description": "Large machinery", "quantity": 1, "unit_price": 25000.0}],
+    }
+
+    result = service.chat(f"post invoice {json.dumps(payload)}", "finance", user_id=1, session_id="fin-approve-1")
+    approval_id = result["approval_required"]["id"]
+
+    approved = service.approve_approval(approval_id, decided_by="tester")
+
+    assert approved is not None
+    assert approved["status"] == "approved"
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM invoices")
+    assert cursor.fetchone()[0] == 1
+    conn.close()
+
+
+def test_inventory_agent_updates_stock_creates_po_and_receives_items(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    adjust_payload = {"product_id": 1, "change_qty": -4, "reason": "sale", "ref_id": 99}
+    adjust_result = service.chat(f"adjust stock {json.dumps(adjust_payload)}", "inventory", user_id=1, session_id="inv-1")
+    assert "stock updated" in adjust_result["response"].lower()
+
+    po_payload = {"product_id": 2, "quantity": 10}
+    po_result = service.chat(f"create purchase order {json.dumps(po_payload)}", "inventory", user_id=1, session_id="inv-1")
+    assert "purchase order created" in po_result["response"].lower()
+
+    receive_payload = {"po_id": 1, "product_id": 2, "received_qty": 10, "received_at": "2025-03-08 09:00:00"}
+    receive_result = service.chat(f"receive purchase order {json.dumps(receive_payload)}", "inventory", user_id=1, session_id="inv-1")
+    assert "receipt recorded" in receive_result["response"].lower()
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT qty_on_hand FROM stock WHERE product_id = 1")
+    assert cursor.fetchone()[0] == 8
+    cursor.execute("SELECT qty_on_hand FROM stock WHERE product_id = 2")
+    assert cursor.fetchone()[0] == 12
+    cursor.execute("SELECT COUNT(*) FROM purchase_orders")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT status FROM purchase_orders WHERE id = 1")
+    assert cursor.fetchone()[0] == "received"
+    conn.close()
+
+
+def test_inventory_agent_uses_llm_for_natural_language_purchase_order(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+    import backend.tools.inventory_tools as inventory_tools
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setattr(inventory_tools, "has_llm_credentials", lambda: True, raising=False)
+    monkeypatch.setattr(
+        inventory_tools,
+        "get_llm",
+        lambda: FakeLLM(
+            [
+                json.dumps(
+                    {
+                        "action": "create_purchase_order",
+                        "payload": {"product_id": 2, "quantity": 10},
+                    }
+                )
+            ]
+        ),
+        raising=False,
+    )
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Please reorder 10 units of product 2 from the best supplier.",
+        "inventory",
+        user_id=1,
+        session_id="inventory-llm-1",
+    )
+
+    assert "purchase order created" in result["response"].lower()
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM purchase_orders")
+    assert cursor.fetchone()[0] == 1
+    conn.close()
+
+
+def test_analytics_agent_enforces_read_only_sql_and_runs_saved_reports(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+
+    reject_result = service.chat("run sql DELETE FROM orders", "analytics", user_id=1, session_id="ana-1")
+    assert "read-only" in reject_result["response"].lower()
+
+    save_payload = {
+        "title": "monthly revenue",
+        "sql": "SELECT strftime('%Y-%m', created_at) AS period, ROUND(SUM(total), 2) AS revenue FROM orders GROUP BY strftime('%Y-%m', created_at) ORDER BY period",
+    }
+    save_result = service.chat(f"save report {json.dumps(save_payload)}", "analytics", user_id=1, session_id="ana-1")
+    assert "saved report" in save_result["response"].lower()
+
+    report_result = service.chat("run report monthly revenue", "analytics", user_id=1, session_id="ana-1")
+    assert "monthly revenue" in report_result["response"].lower()
+    assert report_result["chart_spec"] is not None
+    assert report_result["chart_spec"]["type"] == "bar"
+
+
+def test_api_smoke_endpoints_expose_agents_approvals_and_audit(runtime_paths, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setenv("DB_PATH", str(runtime_db))
+    monkeypatch.setenv("ERP_SAMPLE_DB_PATH", str(sample_db))
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    from backend.api import app
+
+    client = TestClient(app)
+
+    chat_response = client.post(
+        "/chat",
+        json={"message": "show customers", "agent": "router", "user_id": 1, "session_id": "api-1"},
+    )
+    assert chat_response.status_code == 200
+    assert chat_response.json()["agent_used"] == "sales"
+
+    health_response = client.get("/health")
+    assert health_response.status_code == 200
+    assert health_response.json()["agents"]["finance"] == "available"
+
+    approvals_response = client.get("/approvals")
+    assert approvals_response.status_code == 200
+    assert "approvals" in approvals_response.json()
+
+    audit_response = client.get("/audit/tool-calls")
+    assert audit_response.status_code == 200
+    assert audit_response.json()["tool_calls"]

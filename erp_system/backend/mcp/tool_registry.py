@@ -1,40 +1,43 @@
-"""
-Tool Registry for MCP (Model Context Protocol) adapter
-Manages registration and retrieval of tools for the agent system.
-"""
+from __future__ import annotations
 
-from typing import List, Dict, Any, Callable
-from langchain.tools import Tool
+from typing import Any
+
+from .mcp_adapter import MCPAdapter, ToolDefinition, mcp_registry
+
 
 class ToolRegistry:
-    """Registry for managing agent tools"""
-    
-    def __init__(self):
-        self._tools: List[Tool] = []
-        self._tool_map: Dict[str, Tool] = {}
-    
-    def register_tool(self, tool: Any) -> None:
-        """Register a tool in the registry"""
-        # Accept any tool type from LangChain (Tool, StructuredTool, etc.)
-        if hasattr(tool, 'name') and hasattr(tool, 'run'):
-            self._tools.append(tool)
-            self._tool_map[tool.name] = tool
-        else:
-            raise TypeError(f"Expected tool with 'name' and 'run' attributes, got {type(tool)}")
-    
-    def get_tools(self) -> List[Tool]:
-        """Get all registered tools"""
-        return self._tools.copy()
-    
-    def get_tool(self, name: str) -> Tool:
-        """Get a specific tool by name"""
-        return self._tool_map.get(name)
-    
-    def list_tool_names(self) -> List[str]:
-        """Get list of all tool names"""
-        return list(self._tool_map.keys())
-    
+    def __init__(self, adapter: MCPAdapter | None = None):
+        self.adapter = adapter or mcp_registry
+
+    def register_tool(
+        self,
+        name: str,
+        handler,
+        description: str,
+        input_schema: dict[str, Any] | None = None,
+        *,
+        module: str = "shared",
+        read_only: bool = True,
+        requires_approval: bool = False,
+    ) -> ToolDefinition:
+        return self.adapter.register_tool(
+            name=name,
+            handler=handler,
+            description=description,
+            input_schema=input_schema,
+            module=module,
+            read_only=read_only,
+            requires_approval=requires_approval,
+        )
+
+    def get_tool(self, name: str) -> ToolDefinition | None:
+        return self.adapter.get_tool(name)
+
+    def get_tool_info(self, name: str) -> dict[str, Any]:
+        return self.adapter.get_tool_info(name)
+
+    def list_tools(self, module: str | None = None) -> list[dict[str, Any]]:
+        return self.adapter.list_tools(module)
+
     def clear(self) -> None:
-        """Clear all registered tools"""
-        self._tools.clear()
-        self._tool_map.clear()
+        self.adapter.clear()

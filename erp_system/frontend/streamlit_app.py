@@ -1,72 +1,32 @@
+from __future__ import annotations
+
 import os
 import sys
 from pathlib import Path
 
+import pandas as pd
 import requests
 import streamlit as st
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from frontend.runtime_env import bootstrap_runtime_environment
 
-bootstrap_runtime_environment(getattr(st, "secrets", {}))
-
-from backend.runtime import get_direct_service
-
-API_URL = os.getenv("API_URL")
-RUNTIME_MODE = os.getenv("ERP_RUNTIME_MODE", "api" if API_URL else "direct")
-DIRECT_SERVICE = None
-
-if RUNTIME_MODE == "direct":
-    DIRECT_SERVICE = get_direct_service()
+bootstrap_runtime_environment(getattr(st, "secrets", None))
 
 
-def get_health_status():
-    if RUNTIME_MODE == "api":
-        try:
-            response = requests.get(f"{API_URL}/health", timeout=5)
-            if response.status_code == 200:
-                return True, response.json()
-            return False, None
-        except Exception:
-            return False, None
+API_URL = os.getenv("API_URL", "").strip()
+DIRECT_MODE = not API_URL
 
-    return True, DIRECT_SERVICE.get_health()
+if DIRECT_MODE:
+    from backend.runtime import get_direct_service
 
+    direct_service = get_direct_service()
+else:
+    direct_service = None
 
-def call_agent(message: str, agent_type: str) -> str:
-    agent_mapping = {
-        "Router Agent": "router",
-        "Sales Agent": "sales",
-        "Analytics Agent": "analytics",
-    }
-    agent_name = agent_mapping.get(agent_type, "router")
-
-    if RUNTIME_MODE == "api":
-        try:
-            response = requests.post(
-                f"{API_URL}/chat",
-                json={"message": message, "agent": agent_name},
-                timeout=30,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("response", "No response received")
-            return f"Error: API returned status {response.status_code}"
-        except requests.exceptions.Timeout:
-            return "Error: Request timed out. Please try again."
-        except requests.exceptions.ConnectionError:
-            return "Error: Could not connect to backend API."
-        except Exception as exc:
-            return f"Error: {exc}"
-
-    data = DIRECT_SERVICE.chat(message, agent_name)
-    return data["response"]
-
-
-AGENTS_AVAILABLE, health_data = get_health_status()
 
 st.set_page_config(
     page_title="ERP Chat Assistant",
@@ -75,128 +35,297 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-<style>
-    .main-header {
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .user-message {
-        background-color: #e3f2fd;
-        color: #1565c0;
-        padding: 0.8rem;
-        border-radius: 10px;
-        margin: 0.8rem 0 0.8rem 2rem;
-        border-left: 4px solid #2196f3;
-        font-weight: 500;
-    }
-    .assistant-message {
-        background-color: #fff3e0;
-        color: #2e7d32;
-        padding: 0.8rem;
-        border-radius: 10px;
-        margin: 0.8rem 2rem 0.8rem 0;
-        border-left: 4px solid #4caf50;
-        font-weight: 500;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
 
-st.markdown('<h1 class="main-header">🚀 ERP Chat Assistant - Public Demo</h1>', unsafe_allow_html=True)
-
-if not AGENTS_AVAILABLE:
-    st.error("Agents not available. Please check the backend configuration.")
-    if health_data:
-        st.json(health_data)
-    st.stop()
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "selected_agent" not in st.session_state:
-    st.session_state.selected_agent = "Router Agent"
-
-st.sidebar.title("🎯 Select Agent")
-agent_choice = st.sidebar.selectbox(
-    "Choose an agent:",
-    ["Router Agent", "Sales Agent", "Analytics Agent"],
-    key="agent_selector",
-)
-
-if agent_choice != st.session_state.selected_agent:
-    st.session_state.selected_agent = agent_choice
-    st.session_state.messages = []
-
-if st.sidebar.button("Clear Chat"):
-    st.session_state.messages = []
-    st.rerun()
-
-mode_label = "Direct Hosted Mode" if RUNTIME_MODE == "direct" else "API Mode"
-st.sidebar.caption(f"Mode: {mode_label}")
-
-if RUNTIME_MODE == "direct":
-    llm_mode = health_data.get("llm_mode", "fallback") if health_data else "fallback"
-    if llm_mode == "groq-hosted":
-        st.sidebar.success("Live AI mode: Groq-backed hosted responses are enabled.")
-    else:
-        st.sidebar.warning("Fallback mode: hosted AI is disabled or no GROQ_API_KEY was loaded.")
-
-    st.sidebar.info(
-        "This public demo runs Streamlit directly against the ERP runtime layer. "
-        "SQLite data is demo-grade and may reset between restarts."
+def inject_styles() -> None:
+    st.markdown(
+        """
+        <style>
+            .main-header {
+                color: #1f77b4;
+                text-align: center;
+                margin-bottom: 1.6rem;
+            }
+            .user-message {
+                background-color: #e3f2fd;
+                color: #1565c0;
+                padding: 0.8rem 1rem;
+                border-radius: 10px;
+                margin: 0.8rem 0;
+                margin-left: 2rem;
+                border-left: 4px solid #2196f3;
+                font-weight: 500;
+            }
+            .assistant-message {
+                background-color: #fff3e0;
+                color: #2e7d32;
+                padding: 0.8rem 1rem;
+                border-radius: 10px;
+                margin: 0.8rem 0;
+                margin-right: 2rem;
+                border-left: 4px solid #4caf50;
+                font-weight: 500;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+            }
+            .section-card {
+                background: #f8fafc;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                padding: 1rem;
+                margin-top: 1rem;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
+
+
+def get_health() -> dict | None:
+    try:
+        if DIRECT_MODE:
+            return direct_service.get_health()
+        response = requests.get(f"{API_URL}/health", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
+def list_approvals() -> list[dict]:
+    if DIRECT_MODE:
+        return direct_service.list_approvals()
+    response = requests.get(f"{API_URL}/approvals", timeout=20)
+    response.raise_for_status()
+    return response.json()["approvals"]
+
+
+def list_tool_calls() -> list[dict]:
+    if DIRECT_MODE:
+        return direct_service.list_tool_calls()
+    response = requests.get(f"{API_URL}/audit/tool-calls", timeout=20)
+    response.raise_for_status()
+    return response.json()["tool_calls"]
+
+
+def list_saved_reports() -> list[dict]:
+    if DIRECT_MODE:
+        return direct_service.list_saved_reports()
+    response = requests.get(f"{API_URL}/saved-reports", timeout=20)
+    response.raise_for_status()
+    return response.json()["saved_reports"]
+
+
+def call_agent(message: str, agent_name: str, user_id: int, session_id: str) -> dict:
+    if DIRECT_MODE:
+        return direct_service.chat(message, agent_name, user_id=user_id, session_id=session_id)
+    response = requests.post(
+        f"{API_URL}/chat",
+        json={"message": message, "agent": agent_name, "user_id": user_id, "session_id": session_id},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def set_approval(approval_id: int, action: str) -> None:
+    if DIRECT_MODE:
+        if action == "approve":
+            direct_service.approve_approval(approval_id, decided_by="streamlit")
+        else:
+            direct_service.reject_approval(approval_id, decided_by="streamlit")
+        return
+    response = requests.post(f"{API_URL}/approvals/{approval_id}/{action}", timeout=20)
+    response.raise_for_status()
+
+
+def render_chart(chart_spec: dict | None) -> None:
+    if not chart_spec:
+        return
+    data = chart_spec.get("data") or []
+    if not data:
+        st.json(chart_spec)
+        return
+    frame = pd.DataFrame(data)
+    x_column = chart_spec.get("x")
+    y_column = chart_spec.get("y")
+    st.caption(chart_spec.get("title", "Chart"))
+    if x_column in frame.columns and y_column in frame.columns:
+        chart_frame = frame[[x_column, y_column]].set_index(x_column)
+        if chart_spec.get("type") == "line":
+            st.line_chart(chart_frame)
+        else:
+            st.bar_chart(chart_frame)
+    else:
+        st.json(chart_spec)
+
+
+inject_styles()
+
+agent_mapping = {
+    "Router Agent": "router",
+    "Sales Agent": "sales",
+    "Finance Agent": "finance",
+    "Inventory Agent": "inventory",
+    "Analytics Agent": "analytics",
+}
 
 agent_info = {
     "Router Agent": "🤖 Smart routing and system management",
     "Sales Agent": "🛍️ Customer and sales operations",
+    "Finance Agent": "💼 Invoice, payment, and policy workflows",
+    "Inventory Agent": "📦 Stock and procurement operations",
     "Analytics Agent": "📊 Data analysis and reporting",
 }
 
-st.subheader(agent_info[agent_choice])
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "selected_agent" not in st.session_state:
+    st.session_state.selected_agent = "Router Agent"
+if "session_id" not in st.session_state:
+    st.session_state.session_id = "streamlit-main"
+if "user_id" not in st.session_state:
+    st.session_state.user_id = 1
 
-if st.session_state.messages:
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            st.markdown(f'<div class="user-message">👤 You: {message["content"]}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="assistant-message">🤖 {agent_choice}: {message["content"]}</div>', unsafe_allow_html=True)
+health_data = get_health()
+
+st.markdown('<h1 class="main-header">🚀 ERP Chat Assistant - Live Development!</h1>', unsafe_allow_html=True)
+
+if not health_data:
+    st.error("Agents not available. Please check the backend or runtime configuration.")
+    st.stop()
+
+with st.sidebar:
+    st.title("🎯 Select Agent")
+    agent_choice = st.selectbox(
+        "Choose an agent:",
+        list(agent_mapping.keys()),
+        index=list(agent_mapping.keys()).index(st.session_state.selected_agent),
+    )
+    if agent_choice != st.session_state.selected_agent:
+        st.session_state.selected_agent = agent_choice
+        st.session_state.messages = []
+
+    st.session_state.user_id = int(
+        st.number_input("User ID", min_value=1, value=int(st.session_state.user_id), step=1)
+    )
+    st.session_state.session_id = st.text_input("Session ID", value=st.session_state.session_id)
+
+    if st.button("Clear Chat", width="stretch"):
+        st.session_state.messages = []
+        st.rerun()
+
+st.subheader(agent_info[st.session_state.selected_agent])
+
+for message in st.session_state.messages:
+    if message["role"] == "user":
+        st.markdown(
+            f'<div class="user-message">👤 You: {message["content"]}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="assistant-message">🤖 {st.session_state.selected_agent}: {message["content"]}</div>',
+            unsafe_allow_html=True,
+        )
+        render_chart(message.get("chart_spec"))
+        if message.get("rows"):
+            with st.expander("Structured Result"):
+                st.dataframe(pd.DataFrame(message["rows"]), width="stretch")
+        if message.get("tool_calls"):
+            with st.expander("Tool Calls"):
+                st.json(message["tool_calls"])
+        if message.get("approval_required"):
+            with st.expander("Approval Details"):
+                st.json(message["approval_required"])
 
 user_input = st.text_input(
     "Ask a question:",
     key="chat_input",
-    placeholder=f"Ask {agent_choice} something...",
+    placeholder=f"Ask {st.session_state.selected_agent} something...",
 )
 
 if st.button("Send") and user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.spinner(f"Getting response from {agent_choice}..."):
-        response = call_agent(user_input, agent_choice)
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    with st.spinner(f"Getting response from {st.session_state.selected_agent}..."):
+        result = call_agent(
+            user_input,
+            agent_mapping[st.session_state.selected_agent],
+            int(st.session_state.user_id),
+            st.session_state.session_id,
+        )
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": result.get("response", "No response received"),
+            "chart_spec": result.get("chart_spec"),
+            "rows": result.get("rows"),
+            "tool_calls": result.get("tool_calls", []),
+            "approval_required": result.get("approval_required"),
+        }
+    )
     st.rerun()
 
-if health_data:
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if health_data.get("agents", {}).get("router") == "available":
-            st.success("✅ Router Ready")
-        else:
-            st.error("❌ Router Failed")
-    with col2:
-        if health_data.get("agents", {}).get("sales") == "available":
-            st.success("✅ Sales Ready")
-        else:
-            st.error("❌ Sales Failed")
-    with col3:
-        if health_data.get("agents", {}).get("analytics") == "available":
-            st.success("✅ Analytics Ready")
-        else:
-            st.error("❌ Analytics Failed")
+col1, col2, col3 = st.columns(3)
+with col1:
+    router_status = health_data.get("agents", {}).get("router", "unavailable")
+    if router_status == "available":
+        st.success("✅ Router Ready")
+    else:
+        st.error("❌ Router Failed")
+
+with col2:
+    selected_backend_agent = agent_mapping[st.session_state.selected_agent]
+    selected_status = health_data.get("agents", {}).get(selected_backend_agent, "unavailable")
+    if selected_status == "available":
+        st.success(f"✅ {st.session_state.selected_agent.replace(' Agent', '')} Ready")
+    else:
+        st.error(f"❌ {st.session_state.selected_agent.replace(' Agent', '')} Failed")
+
+with col3:
+    provider_mode = str(health_data.get("provider_mode", "fallback")).lower()
+    if provider_mode == "azure":
+        st.success("✅ Azure Connected")
+    else:
+        st.warning("⚠️ Fallback Mode")
+
+with st.expander("Approvals Queue"):
+    approvals = list_approvals()
+    if not approvals:
+        st.info("No approvals found.")
+    for approval in approvals:
+        st.markdown(
+            f"**Approval #{approval['id']}** · `{approval['module']}` · `{approval['status']}`"
+        )
+        st.json(approval["payload_json"])
+        if approval["status"] == "pending":
+            cols = st.columns(2)
+            if cols[0].button("Approve", key=f"approve-{approval['id']}", width="stretch"):
+                set_approval(approval["id"], "approve")
+                st.rerun()
+            if cols[1].button("Reject", key=f"reject-{approval['id']}", width="stretch"):
+                set_approval(approval["id"], "reject")
+                st.rerun()
+
+with st.expander("Audit Trail"):
+    tool_calls = list_tool_calls()
+    if tool_calls:
+        st.dataframe(pd.DataFrame(tool_calls), width="stretch")
+    else:
+        st.info("No tool calls logged yet.")
+
+with st.expander("Saved Reports"):
+    reports = list_saved_reports()
+    if reports:
+        for report in reports:
+            st.markdown(f"**{report['title']}**")
+            st.code(report["sql"])
+    else:
+        st.info("No saved reports yet.")
+
+with st.expander("Health"):
+    st.json(health_data)
 
 st.markdown("---")
-footer_target = API_URL if RUNTIME_MODE == "api" else health_data.get("database_path", "direct-runtime")
-st.info(f"💬 Chat with {agent_choice} • {len(st.session_state.messages)} messages • Runtime: {footer_target}")
+st.info(
+    f"💬 Chat with {st.session_state.selected_agent} • {len(st.session_state.messages)} messages • "
+    f"{'Direct runtime' if DIRECT_MODE else f'API: {API_URL}'}"
+)

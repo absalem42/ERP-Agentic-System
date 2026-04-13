@@ -1,33 +1,37 @@
 import os
 
-from frontend.runtime_env import bootstrap_runtime_environment
-
 
 def test_bootstrap_runtime_environment_sets_missing_values_from_secrets(monkeypatch):
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    from frontend.runtime_env import bootstrap_runtime_environment
+
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
 
     bootstrap_runtime_environment(
         {
-            "GROQ_API_KEY": "secret-key",
-            "GROQ_MODEL": "llama-3.1-8b-instant",
+            "AZURE_OPENAI_API_KEY": "secret-key",
+            "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com",
         }
     )
 
-    assert os.getenv("GROQ_API_KEY") == "secret-key"
-    assert os.getenv("GROQ_MODEL") == "llama-3.1-8b-instant"
+    assert os.getenv("AZURE_OPENAI_API_KEY") == "secret-key"
+    assert os.getenv("AZURE_OPENAI_ENDPOINT") == "https://example.openai.azure.com"
 
 
 def test_bootstrap_runtime_environment_does_not_override_existing_env(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "existing-key")
+    from frontend.runtime_env import bootstrap_runtime_environment
 
-    bootstrap_runtime_environment({"GROQ_API_KEY": "secret-key"})
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "existing-key")
 
-    assert os.getenv("GROQ_API_KEY") == "existing-key"
+    bootstrap_runtime_environment({"AZURE_OPENAI_API_KEY": "secret-key"})
+
+    assert os.getenv("AZURE_OPENAI_API_KEY") == "existing-key"
 
 
 def test_bootstrap_runtime_environment_ignores_unavailable_streamlit_secrets(monkeypatch):
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    from frontend.runtime_env import bootstrap_runtime_environment
+
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
 
     class UnavailableSecrets:
         def __contains__(self, key):
@@ -38,4 +42,4 @@ def test_bootstrap_runtime_environment_ignores_unavailable_streamlit_secrets(mon
 
     bootstrap_runtime_environment(UnavailableSecrets())
 
-    assert os.getenv("GROQ_API_KEY") is None
+    assert os.getenv("AZURE_OPENAI_API_KEY") is None

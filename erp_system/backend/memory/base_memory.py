@@ -1,339 +1,307 @@
-"""
-Base Memory Management System for ERP Agents
-Implements required memory systems according to specifications
-"""
+from __future__ import annotations
 
-import sqlite3
 import json
-import os
 from datetime import datetime
-from typing import Dict, List, Any, Optional
-from pathlib import Path
-from langchain.memory import ConversationBufferWindowMemory, ConversationBufferMemory
-from langchain.schema import BaseMessage, HumanMessage, AIMessage
+from typing import Any
 
-def get_db_path():
-    """Get database path"""
-    configured_path = os.getenv("DB_PATH")
-    if configured_path:
-        return Path(configured_path)
+from backend.db import get_db
 
-    return Path(__file__).parent.parent.parent / "databases" / "erp.db"
 
 class RouterGlobalState:
-    """Manages router's global state and persistence"""
-    
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path or str(get_db_path())
-        self._init_tables()
-    
-    def _init_tables(self):
-        """Initialize required memory tables"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Check if conversations table exists and has required columns
-        cursor.execute("PRAGMA table_info(conversations)")
-        columns = [col[1] for col in cursor.fetchall()]
-        table_exists = 'conversations' in [table[0] for table in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        
-        if table_exists:
-            if 'session_id' not in columns:
-                cursor.execute('ALTER TABLE conversations ADD COLUMN session_id TEXT')
-                print("✅ Added missing session_id column to conversations table")
-            
-            if 'agent_type' not in columns:
-                cursor.execute('ALTER TABLE conversations ADD COLUMN agent_type TEXT')
-                print("✅ Added missing agent_type column to conversations table")
-            
-            if 'created_at' not in columns:
-                cursor.execute('ALTER TABLE conversations ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
-                print("✅ Added missing created_at column to conversations table")
-        
-        # Check messages table columns
-        cursor.execute("PRAGMA table_info(messages)")
-        msg_columns = [col[1] for col in cursor.fetchall()]
-        msg_table_exists = 'messages' in [table[0] for table in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        
-        if msg_table_exists:
-            if 'role' not in msg_columns:
-                cursor.execute('ALTER TABLE messages ADD COLUMN role TEXT')
-                print("✅ Added missing role column to messages table")
-            
-            if 'content' not in msg_columns:
-                cursor.execute('ALTER TABLE messages ADD COLUMN content TEXT')
-                print("✅ Added missing content column to messages table")
-            
-            if 'timestamp' not in msg_columns:
-                cursor.execute('ALTER TABLE messages ADD COLUMN timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
-                print("✅ Added missing timestamp column to messages table")
-        
-        # Create required tables for memory
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT DEFAULT 'default_user',
-                session_id TEXT,
-                agent_type TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path
+        self._ensure_support_columns()
+
+    def _ensure_support_columns(self) -> None:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("PRAGMA table_info(conversations)")
+            conversation_columns = {row[1] for row in cursor.fetchall()}
+            if conversation_columns and "session_id" not in conversation_columns:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN session_id TEXT")
+            if conversation_columns and "agent_type" not in conversation_columns:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN agent_type TEXT")
+            if conversation_columns and "created_at" not in conversation_columns:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+            cursor.execute("PRAGMA table_info(messages)")
+            message_columns = {row[1] for row in cursor.fetchall()}
+            if message_columns and "role" not in message_columns:
+                cursor.execute("ALTER TABLE messages ADD COLUMN role TEXT")
+            if message_columns and "timestamp" not in message_columns:
+                cursor.execute("ALTER TABLE messages ADD COLUMN timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+            conn.commit()
+
+    def get_or_create_conversation(
+        self,
+        user_id: int | str = 1,
+        session_id: str | None = None,
+        agent_type: str = "router",
+    ) -> int:
+        normalized_session = session_id or f"{agent_type}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM conversations WHERE session_id = ? AND user_id = ?",
+                (normalized_session, user_id),
             )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER,
-                role TEXT,
-                content TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+            row = cursor.fetchone()
+            if row:
+                return int(row[0])
+
+            cursor.execute(
+                """
+                INSERT INTO conversations (user_id, started_at, session_id, agent_type, created_at)
+                VALUES (?, CURRENT_TIMESTAMP, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (user_id, normalized_session, agent_type),
             )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS approvals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                request_type TEXT,
-                status TEXT DEFAULT 'pending',
-                requested_by TEXT,
-                approved_by TEXT,
-                details TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def set_active_module(self, conversation_id: int, module: str) -> None:
+        with get_db(self.db_path) as conn:
+            conn.execute(
+                "UPDATE conversations SET agent_type = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (module, conversation_id),
             )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tool_calls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_type TEXT,
-                tool_name TEXT,
-                input_data TEXT,
-                output_data TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            conn.commit()
+
+    def get_active_module(self, conversation_id: int) -> str | None:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT agent_type FROM conversations WHERE id = ?", (conversation_id,))
+            row = cursor.fetchone()
+            return str(row[0]) if row and row[0] else None
+
+    def add_message(self, conversation_id: int, sender: str, content: str, role: str | None = None) -> None:
+        resolved_role = role or sender
+        with get_db(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO messages (conversation_id, sender, content, created_at, role, timestamp)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+                """,
+                (conversation_id, sender, content, resolved_role),
             )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def get_or_create_conversation(self, user_id: str = "default_user", session_id: str = None, agent_type: str = "router"):
-        """Get or create conversation session"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        if session_id:
-            cursor.execute('''
-                SELECT id FROM conversations WHERE session_id = ? AND user_id = ?
-            ''', (session_id, user_id))
-            result = cursor.fetchone()
-            if result:
-                conn.close()
-                return result[0]
-        
-        # Create new conversation
-        cursor.execute('''
-            INSERT INTO conversations (user_id, session_id, agent_type, created_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (user_id, session_id or f"{agent_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", agent_type))
-        
-        conversation_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        return conversation_id
-    
-    def add_message(self, conversation_id: int, role: str, content: str):
-        """Add message to conversation"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO messages (conversation_id, role, content, timestamp)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (conversation_id, role, content))
-        
-        conn.commit()
-        conn.close()
-    
-    def get_conversation_history(self, conversation_id: int, limit: int = 10) -> List[Dict]:
-        """Get conversation history"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT role, content, timestamp FROM messages
-            WHERE conversation_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        ''', (conversation_id, limit))
-        
-        messages = []
-        for role, content, timestamp in cursor.fetchall():
-            messages.append({
-                'role': role,
-                'content': content,
-                'timestamp': timestamp
-            })
-        
-        conn.close()
-        return list(reversed(messages))  # Return in chronological order
-    
-    def log_tool_call(self, agent_type: str, tool_name: str, input_data: Any, output_data: Any):
-        """Log tool call for tracking"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO tool_calls (agent_type, tool_name, input_data, output_data, timestamp)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (agent_type, tool_name, json.dumps(input_data), json.dumps(output_data)))
-        
-        conn.commit()
-        conn.close()
+            conn.commit()
+
+    def get_conversation_history(self, conversation_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT sender, content, COALESCE(timestamp, created_at) AS created
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (conversation_id, limit),
+            )
+            rows = cursor.fetchall()
+        history = [
+            {"sender": row[0], "content": row[1], "created_at": row[2]}
+            for row in reversed(rows)
+        ]
+        return history
+
+    def create_approval(self, module: str, payload: dict[str, Any], requested_by: str) -> dict[str, Any]:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO approvals (module, payload_json, status, requested_by, created_at)
+                VALUES (?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+                """,
+                (module, json.dumps(payload), requested_by),
+            )
+            approval_id = int(cursor.lastrowid)
+            conn.commit()
+        return {
+            "id": approval_id,
+            "module": module,
+            "status": "pending",
+            "requested_by": requested_by,
+            "payload_json": payload,
+        }
+
+    def list_approvals(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = """
+            SELECT id, module, payload_json, status, requested_by, decided_by, created_at, decided_at
+            FROM approvals
+        """
+        params: list[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+        approvals = []
+        for row in rows:
+            approvals.append(
+                {
+                    "id": row[0],
+                    "module": row[1],
+                    "payload_json": json.loads(row[2]) if row[2] else {},
+                    "status": row[3],
+                    "requested_by": row[4],
+                    "decided_by": row[5],
+                    "created_at": row[6],
+                    "decided_at": row[7],
+                }
+            )
+        return approvals
+
+    def resolve_approval(self, approval_id: int, decision: str, decided_by: str) -> dict[str, Any] | None:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE approvals
+                SET status = ?, decided_by = ?, decided_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (decision, decided_by, approval_id),
+            )
+            conn.commit()
+            cursor.execute(
+                """
+                SELECT id, module, payload_json, status, requested_by, decided_by, created_at, decided_at
+                FROM approvals WHERE id = ?
+                """,
+                (approval_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "module": row[1],
+            "payload_json": json.loads(row[2]) if row[2] else {},
+            "status": row[3],
+            "requested_by": row[4],
+            "decided_by": row[5],
+            "created_at": row[6],
+            "decided_at": row[7],
+        }
+
+    def last_tool_call_id(self) -> int:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM tool_calls")
+            return int(cursor.fetchone()[0])
+
+    def log_tool_call(self, agent: str, tool_name: str, input_data: Any, output_data: Any) -> int:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO tool_calls (agent, tool_name, input_json, output_json, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (agent, tool_name, json.dumps(input_data), json.dumps(output_data)),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_tool_calls(self, limit: int = 50, since_id: int | None = None) -> list[dict[str, Any]]:
+        query = """
+            SELECT id, agent, tool_name, input_json, output_json, created_at
+            FROM tool_calls
+        """
+        params: list[Any] = []
+        if since_id is not None:
+            query += " WHERE id > ?"
+            params.append(since_id)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+        tool_calls = []
+        for row in reversed(rows):
+            tool_calls.append(
+                {
+                    "id": row[0],
+                    "agent": row[1],
+                    "tool_name": row[2],
+                    "input_json": json.loads(row[3]) if row[3] else {},
+                    "output_json": json.loads(row[4]) if row[4] else {},
+                    "created_at": row[5],
+                }
+            )
+        return tool_calls
+
 
 class SalesEntityMemory:
-    """Manages customer entity memory for Sales Agent"""
-    
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path or str(get_db_path())
-        self._init_customer_kv_table()
-    
-    def _init_customer_kv_table(self):
-        """Initialize customer key-value memory table"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS customer_kv (
-                customer_id INTEGER,
-                key TEXT,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (customer_id, key)
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path
+
+    def set_customer_info(self, customer_id: int, key: str, value: str) -> None:
+        with get_db(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO customer_kv (customer_id, key, value)
+                VALUES (?, ?, ?)
+                ON CONFLICT(customer_id, key) DO UPDATE SET value = excluded.value
+                """,
+                (customer_id, key, value),
             )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def set_customer_info(self, customer_id: int, key: str, value: str):
-        """Store customer entity information"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO customer_kv (customer_id, key, value, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (customer_id, key, value))
-        
-        conn.commit()
-        conn.close()
-    
-    def get_customer_info(self, customer_id: int, key: str = None) -> Any:
-        """Retrieve customer entity information"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        if key:
-            cursor.execute('''
-                SELECT value FROM customer_kv WHERE customer_id = ? AND key = ?
-            ''', (customer_id, key))
-            result = cursor.fetchone()
-            conn.close()
-            return result[0] if result else None
-        else:
-            cursor.execute('''
-                SELECT key, value FROM customer_kv WHERE customer_id = ?
-            ''', (customer_id,))
-            result = dict(cursor.fetchall())
-            conn.close()
-            return result
-    
-    def update_last_interaction(self, customer_id: int, interaction_type: str):
-        """Update customer's last interaction info"""
-        self.set_customer_info(customer_id, "last_interaction", interaction_type)
-        self.set_customer_info(customer_id, "last_interaction_date", datetime.now().isoformat())
+            conn.commit()
+
+    def get_customer_info(self, customer_id: int, key: str | None = None) -> Any:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            if key is not None:
+                cursor.execute(
+                    "SELECT value FROM customer_kv WHERE customer_id = ? AND key = ?",
+                    (customer_id, key),
+                )
+                row = cursor.fetchone()
+                return row[0] if row else None
+            cursor.execute("SELECT key, value FROM customer_kv WHERE customer_id = ?", (customer_id,))
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
 
 class AnalyticsReportMemory:
-    """Manages saved reports for Analytics Agent"""
-    
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path or str(get_db_path())
-        self._init_saved_reports_table()
-    
-    def _init_saved_reports_table(self):
-        """Initialize saved_reports table"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS saved_reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_name TEXT UNIQUE,
-                sql_query TEXT,
-                parameters TEXT,
-                created_by TEXT DEFAULT 'analytics_agent',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_run TIMESTAMP,
-                run_count INTEGER DEFAULT 0
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path
+
+    def save_report(self, title: str, sql: str) -> str:
+        with get_db(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO saved_reports (title, sql, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (title, sql),
             )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def save_report(self, report_name: str, sql_query: str, parameters: dict = None, created_by: str = "analytics_agent") -> str:
-        """Save a report for future use"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute('''
-                INSERT INTO saved_reports (report_name, sql_query, parameters, created_by, created_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (report_name, sql_query, json.dumps(parameters or {}), created_by))
-            
             conn.commit()
-            conn.close()
-            return f"Report '{report_name}' saved successfully"
-        except sqlite3.IntegrityError:
-            conn.close()
-            return f"Report '{report_name}' already exists"
-    
-    def get_saved_report(self, report_name: str) -> Optional[Dict]:
-        """Retrieve a saved report"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT report_name, sql_query, parameters, created_by, created_at, last_run, run_count
-            FROM saved_reports WHERE report_name = ?
-        ''', (report_name,))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return {
-                'name': result[0],
-                'sql_query': result[1], 
-                'parameters': json.loads(result[2]) if result[2] else {},
-                'created_by': result[3],
-                'created_at': result[4],
-                'last_run': result[5],
-                'run_count': result[6]
-            }
-        return None
-    
-    def update_report_run(self, report_name: str):
-        """Update report run statistics"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE saved_reports 
-            SET last_run = CURRENT_TIMESTAMP, run_count = run_count + 1
-            WHERE report_name = ?
-        ''', (report_name,))
-        
-        conn.commit()
-        conn.close()
+        return f"Saved report '{title}'"
+
+    def get_saved_report(self, title: str) -> dict[str, Any] | None:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, title, sql, created_at FROM saved_reports WHERE lower(title) = lower(?)",
+                (title,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "title": row[1], "sql": row[2], "created_at": row[3]}
+
+    def list_reports(self, limit: int = 50) -> list[dict[str, Any]]:
+        with get_db(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, title, sql, created_at FROM saved_reports ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = cursor.fetchall()
+        return [{"id": row[0], "title": row[1], "sql": row[2], "created_at": row[3]} for row in rows]
