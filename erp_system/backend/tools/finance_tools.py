@@ -259,6 +259,19 @@ class FinanceTools:
             return self.record_payment_tool(extract_json_payload(message))
         if lowered.startswith("post journal") and looks_like_json_payload(message):
             return self.post_journal_tool(extract_json_payload(message))
+        if "invoice" in lowered and "vendor" in lowered:
+            unsupported = {
+                "message": (
+                    "The current finance workflow supports customer invoices only. "
+                    "Vendor/AP invoices are not modeled in this schema yet. Use an existing customer_id "
+                    "for billing workflows."
+                )
+            }
+            return self._log(
+                "unsupported_finance_intent",
+                {"query": message, "unsupported_intent": "vendor_invoice"},
+                unsupported,
+            )
         planned = self._llm_plan(message)
         if planned:
             planned_result = self._dispatch_planned_action(planned, message, requested_by)

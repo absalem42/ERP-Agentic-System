@@ -72,6 +72,18 @@ The UI exposes:
 - saved reports
 - health
 
+Verified demo prompts shown in the UI:
+- router
+  - `Show me this month revenue trend`
+- sales
+  - `Create a new lead for Al Noor Trading, email sales@alnoor.com, interested in 500 units`
+- finance
+  - `Post an invoice for customer 1 linked to order 1 for 15000 AED due on 2025-03-15`
+- inventory
+  - `Reorder 20 units of product 2 from the best supplier`
+- analytics
+  - `What are the top 5 products by revenue and why?`
+
 ## Local Run
 
 ### FastAPI
@@ -128,3 +140,11 @@ Current verification target covers:
 - analytics read-only enforcement and saved reports
 - API smoke endpoints
 - Streamlit hosted env bootstrap
+
+## Presentation Notes
+
+- The sample SQLite database is historical and fixed for demo purposes.
+- Time-relative analytics questions use the real current calendar window first.
+- If the sample database has no rows for the requested current period, the app explains that directly and reports the latest available sample period instead of silently widening the scope to all history.
+- The current finance schema supports customer billing workflows through `invoices.customer_id`.
+- Vendor/AP invoice prompts are rejected safely with a user-facing explanation because that entity model is not part of the current sample schema.

@@ -177,6 +177,14 @@ agent_info = {
     "Analytics Agent": "📊 Data analysis and reporting",
 }
 
+verified_prompt_examples = {
+    "Router Agent": "Show me this month revenue trend",
+    "Sales Agent": "Create a new lead for Al Noor Trading, email sales@alnoor.com, interested in 500 units",
+    "Finance Agent": "Post an invoice for customer 1 linked to order 1 for 15000 AED due on 2025-03-15",
+    "Inventory Agent": "Reorder 20 units of product 2 from the best supplier",
+    "Analytics Agent": "What are the top 5 products by revenue and why?",
+}
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "selected_agent" not in st.session_state:
@@ -225,6 +233,7 @@ with st.sidebar:
         st.rerun()
 
 st.subheader(agent_info[st.session_state.selected_agent])
+st.caption(f"Verified demo prompt: {verified_prompt_examples[st.session_state.selected_agent]}")
 
 for message in st.session_state.messages:
     if message["role"] == "user":
@@ -251,7 +260,7 @@ for message in st.session_state.messages:
 user_input = st.text_input(
     "Ask a question:",
     key="chat_input",
-    placeholder=f"Ask {st.session_state.selected_agent} something...",
+    placeholder=verified_prompt_examples[st.session_state.selected_agent],
 )
 
 if st.button("Send") and user_input:

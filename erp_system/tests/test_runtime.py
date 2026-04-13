@@ -515,9 +515,82 @@ def test_router_handles_revenue_trend_prompt_with_analytics(runtime_paths, monke
 
     assert result["agent_used"] == "analytics"
     assert "no sql mapping" not in result["response"].lower()
-    assert result["rows"]
+    assert result["rows"] == []
+    assert result["chart_spec"] is None
+    assert "no order revenue data is available for 2026-04" in result["response"].lower()
+    assert "latest available revenue data is from 2025-07" in result["response"].lower()
+
+
+def test_analytics_agent_returns_top_products_by_revenue_with_context(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "What are the top 5 products by revenue and why?",
+        "analytics",
+        user_id=1,
+        session_id="ana-top-products-1",
+    )
+
+    assert "read-only" not in result["response"].lower()
+    assert len(result["rows"]) == 5
+    assert set(result["rows"][0]) >= {"product_name", "revenue"}
     assert result["chart_spec"] is not None
-    assert result["chart_spec"]["type"] == "line"
+    assert result["chart_spec"]["type"] == "bar"
+    assert "based on fulfilled order line revenue" in result["response"].lower()
+    assert "context:" in result["response"].lower()
+
+
+def test_analytics_agent_normalizes_fenced_llm_sql_before_validation(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+    import backend.tools.analytics_tools as analytics_tools
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setattr(analytics_tools, "has_llm_credentials", lambda: True, raising=False)
+    monkeypatch.setattr(
+        analytics_tools,
+        "get_llm",
+        lambda: FakeLLM(
+            [
+                "```sql\nSELECT status, COUNT(*) AS order_count FROM orders GROUP BY status ORDER BY status\n```",
+            ]
+        ),
+        raising=False,
+    )
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Group orders by status for me",
+        "analytics",
+        user_id=1,
+        session_id="ana-fenced-sql-1",
+    )
+
+    assert "read-only" not in result["response"].lower()
+    assert result["rows"]
+    assert result["tool_calls"][0]["output_json"]["sql"].startswith("SELECT status")
+
+
+def test_finance_agent_rejects_unsupported_vendor_invoice_prompt_without_llm(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Post an invoice for a new vendor for 15000 AED",
+        "finance",
+        user_id=1,
+        session_id="fin-unsupported-vendor-1",
+    )
+
+    assert "current finance workflow supports customer invoices" in result["response"].lower()
+    assert "existing customer_id" in result["response"].lower()
+    assert result["approval_required"] is None
 
 
 def test_api_smoke_endpoints_expose_agents_approvals_and_audit(runtime_paths, monkeypatch):
