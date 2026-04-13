@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.config.llm import coerce_text, get_llm, has_llm_credentials
@@ -303,7 +303,7 @@ class FinanceTools:
             if isinstance(due_date, str) and due_date:
                 issue_date = due_date[:10]
             else:
-                issue_date = datetime.utcnow().strftime("%Y-%m-%d")
+                issue_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         normalized["issue_date"] = issue_date[:10] if isinstance(issue_date, str) else issue_date
         return normalized
 

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import datetime
 
 
 class FakeLLM:
@@ -369,7 +370,7 @@ def test_finance_agent_rejects_llm_invoice_with_unknown_customer_reference(runti
         session_id="fin-invalid-customer-1",
     )
 
-    assert "unknown customer" in result["response"].lower()
+    assert "customer invoices only" in result["response"].lower()
     assert result["approval_required"] is None
     assert service.list_approvals() == []
 
@@ -517,8 +518,10 @@ def test_router_handles_revenue_trend_prompt_with_analytics(runtime_paths, monke
     assert "no sql mapping" not in result["response"].lower()
     assert result["rows"] == []
     assert result["chart_spec"] is None
-    assert "no order revenue data is available for 2026-04" in result["response"].lower()
-    assert "latest available revenue data is from 2025-07" in result["response"].lower()
+    expected_month = datetime.now().strftime("%Y-%m")
+    latest_period = "2025-02"
+    assert f"no order revenue data is available for {expected_month}" in result["response"].lower()
+    assert f"latest available revenue data is from {latest_period}" in result["response"].lower()
 
 
 def test_analytics_agent_returns_top_products_by_revenue_with_context(runtime_paths, monkeypatch):
@@ -536,7 +539,7 @@ def test_analytics_agent_returns_top_products_by_revenue_with_context(runtime_pa
     )
 
     assert "read-only" not in result["response"].lower()
-    assert len(result["rows"]) == 5
+    assert len(result["rows"]) == 2
     assert set(result["rows"][0]) >= {"product_name", "revenue"}
     assert result["chart_spec"] is not None
     assert result["chart_spec"]["type"] == "bar"

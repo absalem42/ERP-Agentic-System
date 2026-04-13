@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.config.llm import coerce_text, get_llm, has_llm_credentials
@@ -225,7 +225,7 @@ class AnalyticsTools:
                 "meta": {"analysis_type": "total_revenue"},
             }
         if "this month" in lowered and "revenue" in lowered and "trend" in lowered:
-            current_month = datetime.utcnow().strftime("%Y-%m")
+            current_month = datetime.now(timezone.utc).strftime("%Y-%m")
             latest_available = fetch_one(
                 "SELECT strftime('%Y-%m', MAX(created_at)) AS latest_period FROM orders",
                 db_path=self.db_path,
