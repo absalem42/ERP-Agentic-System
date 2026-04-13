@@ -13,6 +13,19 @@ def build_navigation_items(pending_approval_count: int) -> list[dict[str, str]]:
     ]
 
 
+def build_panel_visibility(debug_mode: bool) -> dict[str, bool]:
+    return {
+        "show_identity_controls": debug_mode,
+        "show_approvals": True,
+        "show_saved_reports": True,
+        "show_audit_trail": debug_mode,
+        "show_health": debug_mode,
+        "show_tool_calls": debug_mode,
+        "show_approval_details": debug_mode,
+        "show_footer_runtime": debug_mode,
+    }
+
+
 def assistant_title(agent_used: str | None) -> str:
     if not agent_used:
         return "System"
@@ -20,10 +33,16 @@ def assistant_title(agent_used: str | None) -> str:
     return normalized.title()
 
 
-def build_status_tiles(health: dict[str, Any], pending_approval_count: int) -> list[dict[str, str]]:
+def build_status_tiles(
+    health: dict[str, Any],
+    pending_approval_count: int,
+    current_agent_label: str = "router",
+) -> list[dict[str, str]]:
     provider = provider_badge_text(health)
+    active_agent = assistant_title(current_agent_label)
     return [
         {"label": "Router Ready", "value": "Ready"},
+        {"label": "Active Agent", "value": active_agent},
         {"label": "Pending Approvals", "value": str(pending_approval_count)},
         {"label": "Provider", "value": provider},
     ]

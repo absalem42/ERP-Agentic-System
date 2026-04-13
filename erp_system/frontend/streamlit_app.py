@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from frontend.runtime_env import bootstrap_runtime_environment
+from frontend.ui_helpers import build_panel_visibility, build_status_tiles
 
 bootstrap_runtime_environment(getattr(st, "secrets", None))
 
@@ -184,14 +185,23 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = "streamlit-main"
 if "user_id" not in st.session_state:
     st.session_state.user_id = 1
+if "debug_mode" not in st.session_state:
+    st.session_state.debug_mode = False
 
 health_data = get_health()
+approvals = list_approvals()
+panel_visibility = build_panel_visibility(bool(st.session_state.debug_mode))
 
 st.markdown('<h1 class="main-header">🚀 ERP Chat Assistant - Live Development!</h1>', unsafe_allow_html=True)
 
 if not health_data:
     st.error("Agents not available. Please check the backend or runtime configuration.")
     st.stop()
+
+debug_col, _ = st.columns([1, 5])
+with debug_col:
+    st.session_state.debug_mode = st.toggle("Debug mode", value=bool(st.session_state.debug_mode))
+panel_visibility = build_panel_visibility(bool(st.session_state.debug_mode))
 
 with st.sidebar:
     st.title("🎯 Select Agent")
@@ -204,10 +214,11 @@ with st.sidebar:
         st.session_state.selected_agent = agent_choice
         st.session_state.messages = []
 
-    st.session_state.user_id = int(
-        st.number_input("User ID", min_value=1, value=int(st.session_state.user_id), step=1)
-    )
-    st.session_state.session_id = st.text_input("Session ID", value=st.session_state.session_id)
+    if panel_visibility["show_identity_controls"]:
+        st.session_state.user_id = int(
+            st.number_input("User ID", min_value=1, value=int(st.session_state.user_id), step=1)
+        )
+        st.session_state.session_id = st.text_input("Session ID", value=st.session_state.session_id)
 
     if st.button("Clear Chat", width="stretch"):
         st.session_state.messages = []
@@ -230,10 +241,10 @@ for message in st.session_state.messages:
         if message.get("rows"):
             with st.expander("Structured Result"):
                 st.dataframe(pd.DataFrame(message["rows"]), width="stretch")
-        if message.get("tool_calls"):
+        if panel_visibility["show_tool_calls"] and message.get("tool_calls"):
             with st.expander("Tool Calls"):
                 st.json(message["tool_calls"])
-        if message.get("approval_required"):
+        if panel_visibility["show_approval_details"] and message.get("approval_required"):
             with st.expander("Approval Details"):
                 st.json(message["approval_required"])
 
@@ -264,68 +275,81 @@ if st.button("Send") and user_input:
     )
     st.rerun()
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    router_status = health_data.get("agents", {}).get("router", "unavailable")
-    if router_status == "available":
-        st.success("✅ Router Ready")
-    else:
-        st.error("❌ Router Failed")
-
-with col2:
-    selected_backend_agent = agent_mapping[st.session_state.selected_agent]
-    selected_status = health_data.get("agents", {}).get(selected_backend_agent, "unavailable")
-    if selected_status == "available":
-        st.success(f"✅ {st.session_state.selected_agent.replace(' Agent', '')} Ready")
-    else:
-        st.error(f"❌ {st.session_state.selected_agent.replace(' Agent', '')} Failed")
-
-with col3:
-    provider_mode = str(health_data.get("provider_mode", "fallback")).lower()
-    if provider_mode == "azure":
-        st.success("✅ Azure Connected")
-    else:
-        st.warning("⚠️ Fallback Mode")
-
-with st.expander("Approvals Queue"):
-    approvals = list_approvals()
-    if not approvals:
-        st.info("No approvals found.")
-    for approval in approvals:
-        st.markdown(
-            f"**Approval #{approval['id']}** · `{approval['module']}` · `{approval['status']}`"
-        )
-        st.json(approval["payload_json"])
-        if approval["status"] == "pending":
-            cols = st.columns(2)
-            if cols[0].button("Approve", key=f"approve-{approval['id']}", width="stretch"):
-                set_approval(approval["id"], "approve")
-                st.rerun()
-            if cols[1].button("Reject", key=f"reject-{approval['id']}", width="stretch"):
-                set_approval(approval["id"], "reject")
-                st.rerun()
-
-with st.expander("Audit Trail"):
-    tool_calls = list_tool_calls()
-    if tool_calls:
-        st.dataframe(pd.DataFrame(tool_calls), width="stretch")
-    else:
-        st.info("No tool calls logged yet.")
-
-with st.expander("Saved Reports"):
-    reports = list_saved_reports()
-    if reports:
-        for report in reports:
-            st.markdown(f"**{report['title']}**")
-            st.code(report["sql"])
-    else:
-        st.info("No saved reports yet.")
-
-with st.expander("Health"):
-    st.json(health_data)
-
-st.markdown("---")
-st.info(
-    f"💬 Chat with {st.session_state.selected_agent} • {len(st.session_state.messages)} messages • "
-    f"{'Direct runtime' if DIRECT_MODE else f'API: {API_URL}'}"
+status_tiles = build_status_tiles(
+    health_data,
+    sum(1 for approval in approvals if approval.get("status") == "pending"),
+    current_agent_label=agent_mapping[st.session_state.selected_agent],
 )
+status_columns = st.columns(len(status_tiles))
+router_status = health_data.get("agents", {}).get("router", "unavailable")
+selected_backend_agent = agent_mapping[st.session_state.selected_agent]
+selected_status = health_data.get("agents", {}).get(selected_backend_agent, "unavailable")
+provider_mode = str(health_data.get("provider_mode", "fallback")).lower()
+
+for column, tile in zip(status_columns, status_tiles):
+    with column:
+        if tile["label"] == "Router Ready":
+            if router_status == "available":
+                st.success("✅ Router Ready")
+            else:
+                st.error("❌ Router Failed")
+        elif tile["label"] == "Active Agent":
+            if selected_status == "available":
+                st.success(f"✅ Active Agent: {tile['value']}")
+            else:
+                st.error(f"❌ Active Agent Failed: {tile['value']}")
+        elif tile["label"] == "Provider":
+            if provider_mode == "azure":
+                st.success("✅ Azure Connected")
+            else:
+                st.warning("⚠️ Fallback Mode")
+        else:
+            st.info(f"{tile['label']}: {tile['value']}")
+
+if panel_visibility["show_approvals"]:
+    with st.expander("Approvals Queue"):
+        if not approvals:
+            st.info("No approvals found.")
+        for approval in approvals:
+            st.markdown(
+                f"**Approval #{approval['id']}** · `{approval['module']}` · `{approval['status']}`"
+            )
+            if panel_visibility["show_approval_details"]:
+                st.json(approval["payload_json"])
+            if approval["status"] == "pending":
+                cols = st.columns(2)
+                if cols[0].button("Approve", key=f"approve-{approval['id']}", width="stretch"):
+                    set_approval(approval["id"], "approve")
+                    st.rerun()
+                if cols[1].button("Reject", key=f"reject-{approval['id']}", width="stretch"):
+                    set_approval(approval["id"], "reject")
+                    st.rerun()
+
+if panel_visibility["show_audit_trail"]:
+    with st.expander("Audit Trail"):
+        tool_calls = list_tool_calls()
+        if tool_calls:
+            st.dataframe(pd.DataFrame(tool_calls), width="stretch")
+        else:
+            st.info("No tool calls logged yet.")
+
+if panel_visibility["show_saved_reports"]:
+    with st.expander("Saved Reports"):
+        reports = list_saved_reports()
+        if reports:
+            for report in reports:
+                st.markdown(f"**{report['title']}**")
+                st.code(report["sql"])
+        else:
+            st.info("No saved reports yet.")
+
+if panel_visibility["show_health"]:
+    with st.expander("Health"):
+        st.json(health_data)
+
+if panel_visibility["show_footer_runtime"]:
+    st.markdown("---")
+    st.info(
+        f"💬 Chat with {st.session_state.selected_agent} • {len(st.session_state.messages)} messages • "
+        f"{'Direct runtime' if DIRECT_MODE else f'API: {API_URL}'}"
+    )

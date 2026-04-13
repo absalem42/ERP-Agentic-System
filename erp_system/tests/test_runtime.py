@@ -276,6 +276,60 @@ def test_finance_agent_executes_approved_invoice_after_approval(runtime_paths, m
     conn.close()
 
 
+def test_finance_agent_approval_executes_for_llm_invoice_without_issue_date(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+    import backend.tools.finance_tools as finance_tools
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.setattr(finance_tools, "has_llm_credentials", lambda: True, raising=False)
+    monkeypatch.setattr(
+        finance_tools,
+        "get_llm",
+        lambda: FakeLLM(
+            [
+                json.dumps(
+                    {
+                        "action": "post_invoice",
+                        "payload": {
+                            "customer_id": 1,
+                            "order_id": 1,
+                            "due_date": "2025-03-15",
+                            "lines": [
+                                {
+                                    "description": "Large machinery charge",
+                                    "quantity": 1,
+                                    "unit_price": 25000.0,
+                                }
+                            ],
+                        },
+                    }
+                )
+            ]
+        ),
+        raising=False,
+    )
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Post a new invoice for customer 1 linked to order 1 for a large machinery charge of 25000 AED due on 2025-03-15.",
+        "finance",
+        user_id=1,
+        session_id="fin-approve-llm-1",
+    )
+    approval_id = result["approval_required"]["id"]
+
+    approved = service.approve_approval(approval_id, decided_by="tester")
+
+    assert approved is not None
+    assert approved["status"] == "approved"
+
+    conn = sqlite3.connect(runtime_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT issue_date FROM invoices LIMIT 1")
+    assert cursor.fetchone()[0]
+    conn.close()
+
+
 def test_inventory_agent_updates_stock_creates_po_and_receives_items(runtime_paths, monkeypatch):
     from backend.runtime import DirectERPService
 
@@ -369,6 +423,27 @@ def test_analytics_agent_enforces_read_only_sql_and_runs_saved_reports(runtime_p
     assert "monthly revenue" in report_result["response"].lower()
     assert report_result["chart_spec"] is not None
     assert report_result["chart_spec"]["type"] == "bar"
+
+
+def test_router_handles_revenue_trend_prompt_with_analytics(runtime_paths, monkeypatch):
+    from backend.runtime import DirectERPService
+
+    sample_db, runtime_db = runtime_paths
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    service = DirectERPService(sample_db=sample_db, runtime_db=runtime_db)
+    result = service.chat(
+        "Show me this month revenue trend",
+        "router",
+        user_id=1,
+        session_id="ana-trend-1",
+    )
+
+    assert result["agent_used"] == "analytics"
+    assert "no sql mapping" not in result["response"].lower()
+    assert result["rows"]
+    assert result["chart_spec"] is not None
+    assert result["chart_spec"]["type"] == "line"
 
 
 def test_api_smoke_endpoints_expose_agents_approvals_and_audit(runtime_paths, monkeypatch):

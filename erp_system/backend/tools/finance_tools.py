@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from backend.config.llm import coerce_text, get_llm, has_llm_credentials
@@ -67,6 +68,7 @@ class FinanceTools:
         return self._log("anomaly_detector_tool", payload, result)
 
     def post_invoice_tool(self, payload: dict[str, Any], requested_by: str = "system", approved: bool = False) -> dict[str, Any]:
+        payload = self._normalize_invoice_payload(payload)
         anomaly = self.anomaly_detector_tool(payload)
         total_amount = anomaly["total_amount"]
         if anomaly["is_risky"] and not approved:
@@ -266,6 +268,18 @@ class FinanceTools:
         if action == "post_invoice" or {"customer_id", "lines"} <= set(payload):
             return self.post_invoice_tool(payload, requested_by=requested_by, approved=True)
         return {"message": "No executable finance action found for approval."}
+
+    def _normalize_invoice_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        issue_date = normalized.get("issue_date") or normalized.get("entry_date")
+        if not issue_date:
+            due_date = normalized.get("due_date")
+            if isinstance(due_date, str) and due_date:
+                issue_date = due_date[:10]
+            else:
+                issue_date = datetime.utcnow().strftime("%Y-%m-%d")
+        normalized["issue_date"] = issue_date[:10] if isinstance(issue_date, str) else issue_date
+        return normalized
 
     def _llm_plan(self, message: str) -> dict[str, Any] | None:
         if not has_llm_credentials():

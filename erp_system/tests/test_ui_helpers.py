@@ -1,6 +1,7 @@
 from frontend.ui_helpers import (
     assistant_title,
     build_navigation_items,
+    build_panel_visibility,
     build_status_tiles,
     build_workspace_metrics,
     provider_badge_text,
@@ -70,9 +71,40 @@ def test_assistant_title_normalizes_agent_names():
 
 
 def test_build_status_tiles_uses_provider_and_approval_count():
-    tiles = build_status_tiles({"provider_mode": "azure"}, 3)
+    tiles = build_status_tiles({"provider_mode": "azure"}, 3, current_agent_label="router")
     labels = {tile["label"]: tile["value"] for tile in tiles}
 
     assert labels["Router Ready"] == "Ready"
+    assert labels["Active Agent"] == "Router"
     assert labels["Pending Approvals"] == "3"
     assert labels["Provider"] == "Azure OpenAI live"
+
+
+def test_build_status_tiles_uses_active_agent_label_instead_of_duplicate_router():
+    tiles = build_status_tiles({"provider_mode": "azure"}, 0, current_agent_label="router")
+    labels = [tile["label"] for tile in tiles]
+
+    assert labels.count("Router Ready") == 1
+    assert "Active Agent" in labels
+
+
+def test_build_panel_visibility_hides_debug_only_sections_when_debug_is_off():
+    visible = build_panel_visibility(False)
+
+    assert visible["show_identity_controls"] is False
+    assert visible["show_audit_trail"] is False
+    assert visible["show_health"] is False
+    assert visible["show_tool_calls"] is False
+    assert visible["show_footer_runtime"] is False
+    assert visible["show_approvals"] is True
+    assert visible["show_saved_reports"] is True
+
+
+def test_build_panel_visibility_shows_debug_sections_when_debug_is_on():
+    visible = build_panel_visibility(True)
+
+    assert visible["show_identity_controls"] is True
+    assert visible["show_audit_trail"] is True
+    assert visible["show_health"] is True
+    assert visible["show_tool_calls"] is True
+    assert visible["show_footer_runtime"] is True

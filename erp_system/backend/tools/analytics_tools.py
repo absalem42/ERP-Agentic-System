@@ -186,7 +186,12 @@ class AnalyticsTools:
         lowered = question.lower()
         if "total revenue" in lowered:
             return "SELECT ROUND(COALESCE(SUM(total), 0), 2) AS total_revenue FROM orders"
-        if "revenue by month" in lowered or "monthly revenue" in lowered:
+        if (
+            "revenue by month" in lowered
+            or "monthly revenue" in lowered
+            or ("revenue" in lowered and "trend" in lowered)
+            or ("revenue" in lowered and "this month" in lowered)
+        ):
             return (
                 "SELECT strftime('%Y-%m', created_at) AS period, ROUND(SUM(total), 2) AS revenue "
                 "FROM orders GROUP BY strftime('%Y-%m', created_at) ORDER BY period"
